@@ -24,3 +24,10 @@ def edge_canny(img: np.ndarray, sigma: float = 1.0) -> np.ndarray:
     if img.ndim == 3:
         img = img[0]
     return feature.canny(img, sigma=sigma).astype(np.float32)
+
+
+def edge_roberts(img: np.ndarray) -> np.ndarray:
+    """Roberts edge detection."""
+    if img.ndim == 3:
+        img = img[0]
+    return filters.roberts(img)

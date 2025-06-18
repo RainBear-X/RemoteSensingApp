@@ -25,7 +25,8 @@ config = EngineConfig()
 # 文件操作任务
 config.file_operation_params = {
     "input_dir": TEST_DATA_DIR,
-    "output_dir": os.path.join(OUTPUT_DIR, "file_operation")
+    "output_dir": os.path.join(OUTPUT_DIR, "file_operation"),
+    "input_paths": None,
 }
 # 文件保存任务
 config.file_saver_params = {
@@ -49,6 +50,9 @@ config.image_processing_params = {
         "stretch": { "in_range": (2,98), "out_range": (0,255) }
     }
 }
+
+# Band math 历史表达式文件
+config.band_math_history = os.path.join(OUTPUT_DIR, "band_math_history.json")
 # 矢量处理任务
 config.vector_processing_params = {
     # 将单文件改成列表
