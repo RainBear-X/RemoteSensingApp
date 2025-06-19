@@ -26,7 +26,7 @@ from PyQt6 import uic
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QProgressDialog, QDialog, QFileDialog,
     QListWidget, QVBoxLayout, QLabel, QGraphicsScene, QCheckBox,
-    QLineEdit, QPushButton, QSpinBox
+    QLineEdit, QPushButton, QSpinBox, QComboBox
 )
 from PyQt6.QtGui import QPixmap, QStandardItemModel, QStandardItem
 from PyQt6.QtCore import Qt, QSize
@@ -37,6 +37,8 @@ from src.workers.processing_worker import ProcessingWorker
 from src.workers.file_worker import FileWorker
 from src.workers.file_saver_worker import FileSaverWorker
 from src.workers.vector_worker import VectorWorker
+from src.workers.classification_worker import ClassificationWorker
+from shapely.geometry import Point, LineString, Polygon
 from src.processing.task_manager import TaskManager
 from src.processing.task_result import TaskResult
 
@@ -64,6 +66,9 @@ class MainWindow(QMainWindow):
         self.current_image_files: list[str] = []
         # 对应由 file_operation 生成的 numpy 文件列表
         self.current_numpy_files: list[str] = []
+        # 当前创建的 ROI 或矢量对象
+        self.current_roi = None
+        self.current_vector = None
 
         # 对应 UI 文件目录
         self.ui_dir = os.path.join(os.path.dirname(__file__), 'ui', 'yaogan')
@@ -109,11 +114,38 @@ class MainWindow(QMainWindow):
             'actionImageCutting':    self.show_cut_dialog,
             'actionSpectral_characteristics': self.show_spectral_dialog,
         }
+
+        vector_actions = {
+            'actionCreatingROI': self.show_create_roi_dialog,
+            'actionSaveROIAs': self.show_save_roi_dialog,
+            'actionEditingROI': self.show_edit_roi_dialog,
+            'actionPoint': self.show_create_point_dialog,
+            'actionPolyline': self.show_create_polyline_dialog,
+            'actionPolygon': self.show_create_polygon_dialog,
+        }
+
+        classification_actions = {
+            'actionDecision_Tree': partial(self.show_classification_dialog, 'decision_tree'),
+            'actionRandom_Forest': partial(self.show_classification_dialog, 'random_forest'),
+            'actionMaximum_Likelihood': partial(self.show_classification_dialog, 'maximum_likelihood'),
+            'actionMinimum_Distance': partial(self.show_classification_dialog, 'minimum_distance'),
+            'actionSVM': partial(self.show_classification_dialog, 'svm'),
+            'actionK_means': partial(self.show_classification_dialog, 'kmeans'),
+            'actionISODATA': partial(self.show_classification_dialog, 'isodata'),
+        }
         for action_name, slot in file_actions.items():
             if hasattr(self, action_name):
                 getattr(self, action_name).triggered.connect(slot)
 
         for action_name, slot in image_actions.items():
+            if hasattr(self, action_name):
+                getattr(self, action_name).triggered.connect(slot)
+
+        for action_name, slot in vector_actions.items():
+            if hasattr(self, action_name):
+                getattr(self, action_name).triggered.connect(slot)
+
+        for action_name, slot in classification_actions.items():
             if hasattr(self, action_name):
                 getattr(self, action_name).triggered.connect(slot)
 
@@ -261,6 +293,139 @@ class MainWindow(QMainWindow):
         params = {'output_dir': directory}
         self.run_vector_processing(params)
         dialog.accept()
+
+    # ------ Vector & ROI 操作 ------
+    def show_create_roi_dialog(self):
+        dlg = QDialog(self)
+        dlg.setWindowTitle('Create ROI')
+        layout = QVBoxLayout(dlg)
+        edit = QLineEdit(dlg)
+        edit.setPlaceholderText('x1,y1; x2,y2; x3,y3')
+        btn = QPushButton('Create', dlg)
+        layout.addWidget(edit)
+        layout.addWidget(btn)
+
+        def act():
+            try:
+                pts = [tuple(map(float, p.split(','))) for p in edit.text().split(';') if p.strip()]
+                from src.processing.vector_processing.roi_creator import create_roi_polygon
+                self.current_roi = create_roi_polygon(pts)
+                self.statusBar().showMessage('ROI 已创建', 5000)
+                dlg.accept()
+            except Exception as e:
+                self.statusBar().showMessage(f'创建失败: {e}', 5000)
+
+        btn.clicked.connect(act)
+        dlg.exec()
+
+    def show_edit_roi_dialog(self):
+        if self.current_roi is None:
+            self.statusBar().showMessage('请先创建 ROI', 5000)
+            return
+        dlg = QDialog(self)
+        dlg.setWindowTitle('Edit ROI')
+        layout = QVBoxLayout(dlg)
+        edit = QLineEdit(dlg)
+        edit.setPlaceholderText('new_x1,new_y1; ...')
+        btn = QPushButton('Update', dlg)
+        layout.addWidget(edit)
+        layout.addWidget(btn)
+
+        def act():
+            try:
+                pts = [tuple(map(float, p.split(','))) for p in edit.text().split(';') if p.strip()]
+                from src.processing.vector_processing.roi_editor import edit_roi_polygon
+                self.current_roi = edit_roi_polygon(self.current_roi, pts)
+                self.statusBar().showMessage('ROI 已更新', 5000)
+                dlg.accept()
+            except Exception as e:
+                self.statusBar().showMessage(f'更新失败: {e}', 5000)
+
+        btn.clicked.connect(act)
+        dlg.exec()
+
+    def show_save_roi_dialog(self):
+        if self.current_roi is None:
+            self.statusBar().showMessage('请先创建 ROI', 5000)
+            return
+        path, _ = QFileDialog.getSaveFileName(self, '保存 ROI', '', 'Shapefile (*.shp);;GeoJSON (*.geojson)')
+        if not path:
+            return
+        try:
+            from src.processing.vector_processing.roi_saver import save_roi_to_file
+            save_roi_to_file(self.current_roi, path)
+            self.statusBar().showMessage(f'ROI 已保存到 {path}', 5000)
+        except Exception as e:
+            self.statusBar().showMessage(f'保存失败: {e}', 5000)
+
+    def show_create_point_dialog(self):
+        dlg = QDialog(self)
+        dlg.setWindowTitle('Create Point')
+        layout = QVBoxLayout(dlg)
+        x_edit = QLineEdit(dlg)
+        x_edit.setPlaceholderText('x')
+        y_edit = QLineEdit(dlg)
+        y_edit.setPlaceholderText('y')
+        btn = QPushButton('Create', dlg)
+        for w in (x_edit, y_edit, btn):
+            layout.addWidget(w)
+
+        def act():
+            try:
+                x = float(x_edit.text())
+                y = float(y_edit.text())
+                self.current_vector = Point(x, y)
+                self.statusBar().showMessage('点要素已创建', 5000)
+                dlg.accept()
+            except Exception as e:
+                self.statusBar().showMessage(f'创建失败: {e}', 5000)
+
+        btn.clicked.connect(act)
+        dlg.exec()
+
+    def show_create_polyline_dialog(self):
+        dlg = QDialog(self)
+        dlg.setWindowTitle('Create Polyline')
+        layout = QVBoxLayout(dlg)
+        edit = QLineEdit(dlg)
+        edit.setPlaceholderText('x1,y1; x2,y2; ...')
+        btn = QPushButton('Create', dlg)
+        layout.addWidget(edit)
+        layout.addWidget(btn)
+
+        def act():
+            try:
+                pts = [tuple(map(float, p.split(','))) for p in edit.text().split(';') if p.strip()]
+                self.current_vector = LineString(pts)
+                self.statusBar().showMessage('折线已创建', 5000)
+                dlg.accept()
+            except Exception as e:
+                self.statusBar().showMessage(f'创建失败: {e}', 5000)
+
+        btn.clicked.connect(act)
+        dlg.exec()
+
+    def show_create_polygon_dialog(self):
+        dlg = QDialog(self)
+        dlg.setWindowTitle('Create Polygon')
+        layout = QVBoxLayout(dlg)
+        edit = QLineEdit(dlg)
+        edit.setPlaceholderText('x1,y1; x2,y2; x3,y3')
+        btn = QPushButton('Create', dlg)
+        layout.addWidget(edit)
+        layout.addWidget(btn)
+
+        def act():
+            try:
+                pts = [tuple(map(float, p.split(','))) for p in edit.text().split(';') if p.strip()]
+                self.current_vector = Polygon(pts)
+                self.statusBar().showMessage('多边形已创建', 5000)
+                dlg.accept()
+            except Exception as e:
+                self.statusBar().showMessage(f'创建失败: {e}', 5000)
+
+        btn.clicked.connect(act)
+        dlg.exec()
 
     # ------ Image Display 菜单 ------
     def show_band_extraction_dialog(self):
@@ -646,6 +811,44 @@ class MainWindow(QMainWindow):
         self._run_processing(['band_math'], opts)
         dlg.accept()
 
+    def show_classification_dialog(self, algorithm: str):
+        dlg = QDialog(self)
+        dlg.setWindowTitle('Classification')
+        layout = QVBoxLayout(dlg)
+        feat_edit = QLineEdit(dlg)
+        feat_edit.setPlaceholderText('features.npy')
+        feat_btn = QPushButton('Browse Features', dlg)
+        lbl_edit = QLineEdit(dlg)
+        lbl_edit.setPlaceholderText('labels.npy (optional)')
+        lbl_btn = QPushButton('Browse Labels', dlg)
+        model_box = QComboBox(dlg)
+        model_box.addItems(['decision_tree','random_forest','svm','maximum_likelihood','minimum_distance','kmeans','isodata'])
+        if algorithm in [model_box.itemText(i) for i in range(model_box.count())]:
+            idx = [model_box.itemText(i) for i in range(model_box.count())].index(algorithm)
+            model_box.setCurrentIndex(idx)
+        run_btn = QPushButton('Run', dlg)
+        for w in (feat_edit, feat_btn, lbl_edit, lbl_btn, model_box, run_btn):
+            layout.addWidget(w)
+
+        feat_btn.clicked.connect(lambda: feat_edit.setText(QFileDialog.getOpenFileName(self, '选择 features', '', 'NumPy Files (*.npy)')[0]))
+        lbl_btn.clicked.connect(lambda: lbl_edit.setText(QFileDialog.getOpenFileName(self, '选择 labels', '', 'NumPy Files (*.npy)')[0]))
+
+        def act():
+            feats = feat_edit.text().strip()
+            if not feats:
+                self.statusBar().showMessage('请选择特征文件', 5000)
+                return
+            data = {'features': feats}
+            if lbl_edit.text().strip():
+                data['labels'] = lbl_edit.text().strip()
+            pipeline = {'classifiers': [{'name': model_box.currentText(), 'params': {}}], 'compare': False}
+            params = {'data': data, 'pipeline_config': pipeline, 'model': model_box.currentText()}
+            self.run_classification(params)
+            dlg.accept()
+
+        run_btn.clicked.connect(act)
+        dlg.exec()
+
     def _get_band_count(self) -> int:
         if self.current_image_files:
             try:
@@ -787,6 +990,13 @@ class MainWindow(QMainWindow):
             base.update(override)
         worker = VectorWorker(params=base)
         self._start_worker(worker, "矢量处理")
+
+    def run_classification(self, override: dict | None = None):
+        base = getattr(self.task_manager.config, "classification_params", {}).copy()
+        if override:
+            base.update(override)
+        worker = ClassificationWorker(params=base)
+        self._start_worker(worker, "分类")
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
