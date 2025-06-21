@@ -1,0 +1,430 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>MainWindow</class>
+ <widget class="QMainWindow" name="MainWindow">
+  <property name="geometry">
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>770</width>
+    <height>600</height>
+   </rect>
+  </property>
+  <property name="windowTitle">
+   <string>MainWindow</string>
+  </property>
+  <widget class="QWidget" name="centralwidget">
+   <widget class="QWidget" name="layoutWidget">
+    <property name="geometry">
+     <rect>
+      <x>0</x>
+      <y>0</y>
+      <width>791</width>
+      <height>561</height>
+     </rect>
+    </property>
+    <layout class="QHBoxLayout" name="horizontalLayout_2">
+     <item>
+      <widget class="QFrame" name="frame">
+       <property name="sizePolicy">
+        <sizepolicy hsizetype="Expanding" vsizetype="Expanding">
+         <horstretch>4</horstretch>
+         <verstretch>0</verstretch>
+        </sizepolicy>
+       </property>
+       <property name="frameShape">
+        <enum>QFrame::StyledPanel</enum>
+       </property>
+       <property name="frameShadow">
+        <enum>QFrame::Raised</enum>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QFrame" name="frame_2">
+       <property name="sizePolicy">
+        <sizepolicy hsizetype="Expanding" vsizetype="Expanding">
+         <horstretch>15</horstretch>
+         <verstretch>0</verstretch>
+        </sizepolicy>
+       </property>
+       <property name="frameShape">
+        <enum>QFrame::StyledPanel</enum>
+       </property>
+       <property name="frameShadow">
+        <enum>QFrame::Raised</enum>
+       </property>
+      </widget>
+     </item>
+    </layout>
+   </widget>
+  </widget>
+  <widget class="QMenuBar" name="menubar">
+   <property name="geometry">
+    <rect>
+     <x>0</x>
+     <y>0</y>
+     <width>770</width>
+     <height>18</height>
+    </rect>
+   </property>
+   <widget class="QMenu" name="menu_File">
+    <property name="title">
+     <string>File</string>
+    </property>
+    <addaction name="actionOpenImageFile"/>
+    <addaction name="actionOpenVectorData"/>
+    <addaction name="actionSaveImageFileAs"/>
+    <addaction name="actionSaveVectorFileAs"/>
+    <addaction name="actionExit"/>
+   </widget>
+   <widget class="QMenu" name="menu_ImageDisplay">
+    <property name="title">
+     <string>Image display</string>
+    </property>
+    <addaction name="actionBandextraction"/>
+    <addaction name="actionviewingmetadata"/>
+    <addaction name="actionBandsynthesis"/>
+    <addaction name="actionImageCutting"/>
+    <addaction name="actionProjection"/>
+    <addaction name="actionHistogram"/>
+    <addaction name="actionSpectral_characteristics"/>
+   </widget>
+   <widget class="QMenu" name="menu_image_processing">
+    <property name="title">
+     <string>Image processing</string>
+    </property>
+    <widget class="QMenu" name="menu_Image_enhancement">
+     <property name="title">
+      <string>Image enhancement</string>
+     </property>
+     <addaction name="actionImagestretching"/>
+     <addaction name="actionEqualize"/>
+    </widget>
+    <widget class="QMenu" name="menu_Filtering">
+     <property name="title">
+      <string>Filtering</string>
+     </property>
+     <addaction name="actionSmoothing"/>
+     <addaction name="actionSharpening"/>
+     <addaction name="actionEdgedetection"/>
+    </widget>
+    <addaction name="menu_Image_enhancement"/>
+    <addaction name="menu_Filtering"/>
+    <addaction name="actionBandMath"/>
+   </widget>
+   <widget class="QMenu" name="menu_ROI">
+    <property name="title">
+     <string>Vector</string>
+    </property>
+    <widget class="QMenu" name="menu_Creating_Vector">
+     <property name="title">
+      <string>Creating Vector</string>
+     </property>
+     <addaction name="actionPoint"/>
+     <addaction name="actionPolyline"/>
+     <addaction name="actionPolygon"/>
+    </widget>
+    <addaction name="actionCreatingROI"/>
+    <addaction name="actionSaveROIAs"/>
+    <addaction name="actionEditingROI"/>
+    <addaction name="menu_Creating_Vector"/>
+   </widget>
+   <widget class="QMenu" name="menuClassification">
+    <property name="title">
+     <string>Classification</string>
+    </property>
+    <widget class="QMenu" name="menuSupervised_Classification">
+     <property name="title">
+      <string>Supervised Classification</string>
+     </property>
+     <addaction name="actionMaximum_Likelihood"/>
+     <addaction name="actionMinimum_Distance"/>
+     <addaction name="actionSVM"/>
+     <addaction name="actionDecision_Tree"/>
+     <addaction name="actionRandom_Forest"/>
+    </widget>
+    <widget class="QMenu" name="menuUnsupervised_Classification">
+     <property name="title">
+      <string>Unsupervised Classification</string>
+     </property>
+     <addaction name="actionK_means"/>
+     <addaction name="actionISODATA"/>
+    </widget>
+    <widget class="QMenu" name="menuClassification_Result_Processing">
+     <property name="title">
+      <string>Classification Result Processing</string>
+     </property>
+     <addaction name="actionCustom_Color"/>
+     <addaction name="actionSmooth_Processing"/>
+     <addaction name="actionDenoising"/>
+    </widget>
+    <addaction name="menuSupervised_Classification"/>
+    <addaction name="menuUnsupervised_Classification"/>
+    <addaction name="actionDeep_leraning_Classification"/>
+    <addaction name="actionSave_Model_As"/>
+    <addaction name="menuClassification_Result_Processing"/>
+    <addaction name="actionGenerating"/>
+   </widget>
+   <widget class="QMenu" name="menuAccuracy_Evaluation">
+    <property name="title">
+     <string>Accuracy Evaluation</string>
+    </property>
+    <addaction name="actionConfusion_Matrix"/>
+    <addaction name="actionOverall_Accuracy"/>
+    <addaction name="actionKappa"/>
+    <addaction name="actionVerify_Sample_Accuracy_Test"/>
+    <addaction name="actionGenerate_Accuracy_Evaluation_Table"/>
+   </widget>
+   <widget class="QMenu" name="menuModel">
+    <property name="title">
+     <string>Model</string>
+    </property>
+   </widget>
+   <widget class="QMenu" name="menuHelp">
+    <property name="title">
+     <string>Help</string>
+    </property>
+    <addaction name="actionLanguage"/>
+    <addaction name="actionGuide"/>
+    <addaction name="actionHelp"/>
+   </widget>
+   <addaction name="menu_File"/>
+   <addaction name="menu_ImageDisplay"/>
+   <addaction name="menu_image_processing"/>
+   <addaction name="menu_ROI"/>
+   <addaction name="menuClassification"/>
+   <addaction name="menuAccuracy_Evaluation"/>
+   <addaction name="menuModel"/>
+   <addaction name="menuHelp"/>
+  </widget>
+  <widget class="QStatusBar" name="statusbar"/>
+  <action name="actionOpenImageFile">
+   <property name="text">
+    <string>Open Image File</string>
+   </property>
+  </action>
+  <action name="actionOpenVectorData">
+   <property name="text">
+    <string>Open vector data</string>
+   </property>
+  </action>
+  <action name="actionBandextraction">
+   <property name="text">
+    <string>Band extraction</string>
+   </property>
+  </action>
+  <action name="actionviewingmetadata">
+   <property name="text">
+    <string>viewing metadata</string>
+   </property>
+  </action>
+  <action name="actionSaveImageFileAs">
+   <property name="text">
+    <string>Save Image File As</string>
+   </property>
+  </action>
+  <action name="actionSaveVectorFileAs">
+   <property name="text">
+    <string>Save Vector File As</string>
+   </property>
+  </action>
+  <action name="actionBandsynthesis">
+   <property name="text">
+    <string>Band synthesis</string>
+   </property>
+  </action>
+  <action name="actionImageCutting">
+   <property name="text">
+    <string>Image Cutting</string>
+   </property>
+  </action>
+  <action name="actionProjection">
+   <property name="text">
+    <string>Projection</string>
+   </property>
+  </action>
+  <action name="actionHistogram">
+   <property name="text">
+    <string>Histogram</string>
+   </property>
+  </action>
+  <action name="actionSpectral_characteristics">
+   <property name="text">
+    <string>Spectral characteristics</string>
+   </property>
+  </action>
+  <action name="actionImagestretching">
+   <property name="text">
+    <string>Image stretching</string>
+   </property>
+  </action>
+  <action name="actionEqualize">
+   <property name="text">
+    <string>Equalize</string>
+   </property>
+  </action>
+  <action name="actionSmoothing">
+   <property name="text">
+    <string>Smoothing</string>
+   </property>
+  </action>
+  <action name="actionSharpening">
+   <property name="text">
+    <string>Sharpening</string>
+   </property>
+  </action>
+  <action name="actionEdgedetection">
+   <property name="text">
+    <string>Edge detection</string>
+   </property>
+  </action>
+  <action name="actionBandMath">
+   <property name="text">
+    <string>Band Math</string>
+   </property>
+  </action>
+  <action name="actionCreatingROI">
+   <property name="text">
+    <string>Creating ROI</string>
+   </property>
+  </action>
+  <action name="actionSaveROIAs">
+   <property name="text">
+    <string>Save ROI As</string>
+   </property>
+  </action>
+  <action name="actionEditingROI">
+   <property name="text">
+    <string>Editing ROI</string>
+   </property>
+  </action>
+  <action name="actionPoint">
+   <property name="text">
+    <string>Point</string>
+   </property>
+  </action>
+  <action name="actionPolyline">
+   <property name="text">
+    <string>Polyline</string>
+   </property>
+  </action>
+  <action name="actionPolygon">
+   <property name="text">
+    <string>Polygon</string>
+   </property>
+  </action>
+  <action name="actionMaximum_Likelihood">
+   <property name="text">
+    <string>Maximum Likelihood</string>
+   </property>
+  </action>
+  <action name="actionMinimum_Distance">
+   <property name="text">
+    <string>Minimum Distance</string>
+   </property>
+  </action>
+  <action name="actionSVM">
+   <property name="text">
+    <string>SVM</string>
+   </property>
+  </action>
+  <action name="actionDecision_Tree">
+   <property name="text">
+    <string>Decision Tree</string>
+   </property>
+  </action>
+  <action name="actionRandom_Forest">
+   <property name="text">
+    <string>Random Forest</string>
+   </property>
+  </action>
+  <action name="actionK_means">
+   <property name="text">
+    <string>K-means</string>
+   </property>
+  </action>
+  <action name="actionISODATA">
+   <property name="text">
+    <string>ISODATA</string>
+   </property>
+  </action>
+  <action name="actionDeep_leraning_Classification">
+   <property name="text">
+    <string>Deep-leraning Classification</string>
+   </property>
+  </action>
+  <action name="actionSave_Model_As">
+   <property name="text">
+    <string>Save Model As</string>
+   </property>
+  </action>
+  <action name="actionCustom_Color">
+   <property name="text">
+    <string>Custom Color</string>
+   </property>
+  </action>
+  <action name="actionSmooth_Processing">
+   <property name="text">
+    <string>Smooth Processing</string>
+   </property>
+  </action>
+  <action name="actionDenoising">
+   <property name="text">
+    <string>Denoising</string>
+   </property>
+  </action>
+  <action name="actionConfusion_Matrix">
+   <property name="text">
+    <string>Confusion Matrix</string>
+   </property>
+  </action>
+  <action name="actionOverall_Accuracy">
+   <property name="text">
+    <string>Overall Accuracy</string>
+   </property>
+  </action>
+  <action name="actionKappa">
+   <property name="text">
+    <string>Kappa</string>
+   </property>
+  </action>
+  <action name="actionVerify_Sample_Accuracy_Test">
+   <property name="text">
+    <string>Verifing Sample Accuracy Test</string>
+   </property>
+  </action>
+  <action name="actionExit">
+   <property name="text">
+    <string>Exit</string>
+   </property>
+  </action>
+  <action name="actionGenerate_Accuracy_Evaluation_Table">
+   <property name="text">
+    <string>Generating Accuracy Evaluation Table</string>
+   </property>
+  </action>
+  <action name="actionGenerating">
+   <property name="text">
+    <string>Generating Classification Report</string>
+   </property>
+  </action>
+  <action name="actionLanguage">
+   <property name="text">
+    <string>Language</string>
+   </property>
+  </action>
+  <action name="actionGuide">
+   <property name="text">
+    <string>Guide</string>
+   </property>
+  </action>
+  <action name="actionHelp">
+   <property name="text">
+    <string>About This App</string>
+   </property>
+  </action>
+ </widget>
+ <resources/>
+ <connections/>
+</ui>
