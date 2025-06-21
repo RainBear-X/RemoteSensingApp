@@ -50,6 +50,11 @@ config.image_processing_params = {
         "stretch": { "in_range": (2,98), "out_range": (0,255) }
     }
 }
+# 特征提取任务
+config.feature_extraction_params = {
+    "input_files": glob.glob(os.path.join(OUTPUT_DIR, "processed", "*.npy")),
+    "output_dir": os.path.join(OUTPUT_DIR, "features")
+}
 # Band math 历史表达式文件
 config.band_math_history = os.path.join(OUTPUT_DIR, "band_math_history.json")
 # 矢量处理任务
