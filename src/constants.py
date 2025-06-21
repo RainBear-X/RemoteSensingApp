@@ -14,16 +14,16 @@
 from pathlib import Path
 
 # 项目根目录（src 上一级）
-ROOT_DIR = Path(__file__).resolve().parent
+ROOT_DIR = Path(__file__).resolve().parent.parent
 BASE_DIR = str(ROOT_DIR)
 # 测试数据目录：位于 src/data/test_data
 TEST_DATA_DIR = str(ROOT_DIR / "data" / "test_data")
 # 默认结果输出目录
 OUTPUT_DIR = str(ROOT_DIR / "results")
-print(f"测试数据目录: {TEST_DATA_DIR}")
 # 其他常量
 SUPPORTED_TASKS = [
     "file_operation", "file_saver", "image_display",
-    "image_processing", "vector_processing",
-    "classification", "evaluation"
+    "image_processing", "feature_extraction",
+    "vector_processing", "classification",
+    "evaluation"
 ]

@@ -26,18 +26,22 @@ from PyQt6 import uic
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QProgressDialog, QDialog, QFileDialog,
     QListWidget, QVBoxLayout, QLabel, QGraphicsScene, QCheckBox,
-    QLineEdit, QPushButton, QSpinBox, QComboBox
+    QLineEdit, QPushButton, QSpinBox, QComboBox, QSizePolicy,
+    QDockWidget, QMenu, QListWidgetItem
 )
-from PyQt6.QtGui import QPixmap, QStandardItemModel, QStandardItem
+from PyQt6.QtGui import QPixmap, QStandardItemModel, QStandardItem, QImage
 from PyQt6.QtCore import Qt, QSize
 from functools import partial
 from PyQt6.QtCore import QThread
-from src.workers.display_worker import DisplayWorker
+import numpy as np
+import rasterio
 from src.workers.processing_worker import ProcessingWorker
 from src.workers.file_worker import FileWorker
 from src.workers.file_saver_worker import FileSaverWorker
 from src.workers.vector_worker import VectorWorker
 from src.workers.classification_worker import ClassificationWorker
+from src.workers.feature_worker import FeatureWorker
+from src.workers.evaluation_worker import EvaluationWorker
 from shapely.geometry import Point, LineString, Polygon
 from src.processing.task_manager import TaskManager
 from src.processing.task_result import TaskResult
@@ -70,13 +74,50 @@ class MainWindow(QMainWindow):
         # 对应 UI 文件目录
         self.ui_dir = os.path.join(os.path.dirname(__file__), 'ui', 'yaogan')
 
+        # 调整 UI 布局，使窗口缩放时内容可自适应
+        central = getattr(self, "centralwidget", None)
+        layout_widget = getattr(self, "layoutWidget", None)
+        if central and layout_widget:
+            layout = layout_widget.layout()
+            central.setLayout(layout)
+            layout_widget.setParent(None)
+            if hasattr(self, "frame"):
+                layout.removeWidget(self.frame)
+                self.frame.deleteLater()
+
+        # 左侧文件列表停靠面板
+        self.sideDock = QDockWidget("Files", self)
+        self.sideList = QListWidget()
+        self.sideDock.setWidget(self.sideList)
+        self.sideDock.setAllowedAreas(
+            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
+        )
+        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.sideDock)
+        self.sideList.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.sideList.customContextMenuRequested.connect(self._show_side_list_menu)
+        self.sideList.itemChanged.connect(self._on_side_item_changed)
+        self.sideList.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
+
         # 在主界面右侧用于显示结果的 QLabel
         self.imageLabel = QLabel(self.frame_2)
         self.imageLabel.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.imageLabel.setScaledContents(True)
+        self.imageLabel.setScaledContents(False)
+        # PyQt6 将 QSizePolicy 的枚举值放在 Policy 名称空间下
+        self.imageLabel.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        self.imageLabel.installEventFilter(self)
+        self.current_pixmap: QPixmap | None = None
         right_layout = QVBoxLayout(self.frame_2)
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.addWidget(self.imageLabel)
+
+        # 文件状态记录
+        self.file_status: dict[str, str] = {}
+        # 文件可见性
+        self.file_visibility: dict[str, bool] = {}
+        # 向下兼容的 PNG 映射表
+        self.display_pngs: dict[str, str] = {}
 
         # ========== 菜单与对话框绑定 ==========
         # File 菜单的四个动作需要与后台任务交互，单独处理
@@ -95,6 +136,7 @@ class MainWindow(QMainWindow):
             'actionSharpening':      self.show_sharpening_dialog,
             'actionEdgedetection':   self.show_edge_dialog,
             'actionBandMath':        self.show_band_math_dialog,
+            'actionGenerating':      self.show_feature_extraction_dialog,
         }
 
         # 仅显示静态对话框的动作
@@ -111,6 +153,13 @@ class MainWindow(QMainWindow):
             'actionImageCutting':    self.show_cut_dialog,
             'actionSpectral_characteristics': self.show_spectral_dialog,
         }
+        evaluation_actions = {
+            'actionConfusion_Matrix': self.show_evaluation_dialog,
+            'actionOverall_Accuracy': self.show_evaluation_dialog,
+            'actionKappa': self.show_evaluation_dialog,
+            'actionVerify_Sample_Accuracy_Test': self.show_evaluation_dialog,
+            'actionGenerate_Accuracy_Evaluation_Table': self.show_evaluation_dialog,
+        }
         for action_name, slot in file_actions.items():
             if hasattr(self, action_name):
                 getattr(self, action_name).triggered.connect(slot)
@@ -120,6 +169,10 @@ class MainWindow(QMainWindow):
                 getattr(self, action_name).triggered.connect(slot)
 
         for action_name, slot in processing_actions.items():
+            if hasattr(self, action_name):
+                getattr(self, action_name).triggered.connect(slot)
+
+        for action_name, slot in evaluation_actions.items():
             if hasattr(self, action_name):
                 getattr(self, action_name).triggered.connect(slot)
 
@@ -174,13 +227,16 @@ class MainWindow(QMainWindow):
     def _populate_image_list(self, widget: QListWidget, directory: str):
         files = [f for f in os.listdir(directory) if f.lower().endswith(('.tif', '.tiff'))]
         widget.clear()
+        widget.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
         widget.addItems(files)
 
     def _open_image(self, dialog: QDialog, widget: QListWidget, directory: str):
         selected = [os.path.join(directory, item.text()) for item in widget.selectedItems()]
         if not selected:
             return
-        self.current_image_files = selected
+        for f in selected:
+            if f not in self.current_image_files:
+                self.current_image_files.append(f)
         params = {'input_paths': selected}
         self.run_file_operation(params)
         dialog.accept()
@@ -221,8 +277,12 @@ class MainWindow(QMainWindow):
         dialog.accept()
 
     def _populate_vector_list(self, widget: QListWidget, directory: str):
-        files = [f for f in os.listdir(directory) if f.lower().endswith(('.shp', '.geojson', '.json', '.gpkg'))]
+        files = [
+            f for f in os.listdir(directory)
+            if f.lower().endswith((".shp", ".geojson", ".json", ".gpkg"))
+        ]
         widget.clear()
+        widget.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
         widget.addItems(files)
 
     def show_save_image_dialog(self):
@@ -423,7 +483,7 @@ class MainWindow(QMainWindow):
             bands = [int(b) for b in text.replace(' ', '').split(',') if b]
         if not bands:
             bands = [1]
-        self.run_image_display({'bands': bands})
+        self._preview_bands(bands)
         dialog.accept()
 
     def show_band_synthesis_dialog(self):
@@ -448,7 +508,7 @@ class MainWindow(QMainWindow):
         except Exception:
             dialog.reject()
             return
-        self.run_image_display({'bands': [b1, b2, b3]})
+        self._preview_bands([b1, b2, b3])
         dialog.accept()
 
     def show_histogram_dialog(self):
@@ -605,6 +665,44 @@ class MainWindow(QMainWindow):
             model.appendRow(item)
         dialog.listView.setModel(model)
         dialog.exec()
+
+    def show_evaluation_dialog(self):
+        dlg = QDialog(self)
+        dlg.setWindowTitle('Accuracy Evaluation')
+        layout = QVBoxLayout(dlg)
+        class_edit = QLineEdit(dlg)
+        class_edit.setPlaceholderText('class_map.npy')
+        class_btn = QPushButton('Browse Classification', dlg)
+        roi_edit = QLineEdit(dlg)
+        roi_edit.setPlaceholderText('roi_mask.npy')
+        roi_btn = QPushButton('Browse ROI', dlg)
+        out_edit = QLineEdit(dlg)
+        out_edit.setPlaceholderText('output directory (optional)')
+        out_btn = QPushButton('Browse Output', dlg)
+        run_btn = QPushButton('Run', dlg)
+        for w in (class_edit, class_btn, roi_edit, roi_btn, out_edit, out_btn, run_btn):
+            layout.addWidget(w)
+        class_btn.clicked.connect(lambda: class_edit.setText(QFileDialog.getOpenFileName(self, '选择分类结果')[0]))
+        roi_btn.clicked.connect(lambda: roi_edit.setText(QFileDialog.getOpenFileName(self, '选择 ROI 掩膜')[0]))
+        out_btn.clicked.connect(lambda: out_edit.setText(QFileDialog.getExistingDirectory(self, '选择输出目录')))
+
+        def act():
+            class_map = class_edit.text().strip()
+            roi_mask = roi_edit.text().strip()
+            if not class_map or not roi_mask:
+                self.statusBar().showMessage('请选择输入文件', 5000)
+                return
+            params = {
+                'class_map_path': class_map,
+                'roi_mask_path': roi_mask,
+            }
+            if out_edit.text().strip():
+                params['output_dir'] = out_edit.text().strip()
+            self.run_evaluation(params)
+            dlg.accept()
+
+        run_btn.clicked.connect(act)
+        dlg.exec()
 
     # ------ Image Processing 菜单 ------
     def _run_processing(self, methods: list[str], options: dict | None = None):
@@ -782,6 +880,37 @@ class MainWindow(QMainWindow):
         self._run_processing(['band_math'], opts)
         dlg.accept()
 
+    def show_feature_extraction_dialog(self):
+        dlg = QDialog(self)
+        dlg.setWindowTitle('Feature Extraction')
+        layout = QVBoxLayout(dlg)
+        input_edit = QLineEdit(dlg)
+        input_edit.setPlaceholderText('input files (npy or tif)')
+        input_btn = QPushButton('Browse', dlg)
+        out_edit = QLineEdit(dlg)
+        out_edit.setPlaceholderText('output directory')
+        out_btn = QPushButton('Browse', dlg)
+        run_btn = QPushButton('Run', dlg)
+        for w in (input_edit, input_btn, out_edit, out_btn, run_btn):
+            layout.addWidget(w)
+        input_btn.clicked.connect(lambda: input_edit.setText(','.join(QFileDialog.getOpenFileNames(self, '选择输入文件')[0])))
+        out_btn.clicked.connect(lambda: out_edit.setText(QFileDialog.getExistingDirectory(self, '选择输出目录')))
+
+        def act():
+            files = [f for f in input_edit.text().split(',') if f.strip()]
+            if not files:
+                self.statusBar().showMessage('请选择输入文件', 5000)
+                return
+            params = {
+                'input_files': files,
+                'output_dir': out_edit.text().strip() or self.task_manager.config.feature_extraction_params.get('output_dir')
+            }
+            self.run_feature_extraction(params)
+            dlg.accept()
+
+        run_btn.clicked.connect(act)
+        dlg.exec()
+
     def show_classification_dialog(self, algorithm: str):
         dlg = QDialog(self)
         dlg.setWindowTitle('Classification')
@@ -839,6 +968,56 @@ class MainWindow(QMainWindow):
                 pass
         return 3
 
+    def _update_image_label(self, pixmap: QPixmap) -> None:
+        """在右侧标签展示给定的图像"""
+        self.current_pixmap = pixmap
+        scaled = pixmap.scaled(
+            self.imageLabel.size() if self.imageLabel.size() != QSize(0, 0) else pixmap.size(),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self.imageLabel.setPixmap(scaled)
+
+    def _load_raster_pixmap(self, path: str, bands: list[int] | None = None) -> QPixmap | None:
+        """读取遥感影像并转换为 QPixmap"""
+        try:
+            with rasterio.open(path) as src:
+                if bands is None:
+                    bands = [1, 2, 3] if src.count >= 3 else [1]
+                bands = [b for b in bands if 1 <= b <= src.count]
+                if not bands:
+                    return None
+                data = src.read(bands)
+        except Exception as e:
+            self.statusBar().showMessage(f"读取影像失败: {e}", 5000)
+            return None
+
+        data = data.astype(float)
+        mn = data.min(axis=(1, 2), keepdims=True)
+        mx = data.max(axis=(1, 2), keepdims=True)
+        data = (data - mn) / (mx - mn + 1e-8)
+        data = (data * 255).clip(0, 255).astype(np.uint8)
+
+        if data.shape[0] == 1:
+            img = data[0]
+            qimg = QImage(img.data, img.shape[1], img.shape[0], img.strides[0], QImage.Format.Format_Grayscale8)
+        else:
+            img = np.transpose(data, (1, 2, 0))
+            qimg = QImage(img.data, img.shape[1], img.shape[0], img.strides[0], QImage.Format.Format_RGB888)
+        return QPixmap.fromImage(qimg.copy())
+
+    def _preview_bands(self, bands: list[int]):
+        """根据指定波段在界面预览当前文件"""
+        for path in self.current_image_files:
+            name = os.path.basename(path)
+            if self.file_visibility.get(name, True):
+                pix = self._load_raster_pixmap(path, bands)
+                if pix:
+                    self._update_image_label(pix)
+                return
+        self.imageLabel.clear()
+        self.current_pixmap = None
+
     def display_image(self, img_path: str) -> None:
         """在界面展示生成的 PNG 结果，并弹出预览对话框"""
         pixmap = QPixmap(img_path)
@@ -847,12 +1026,7 @@ class MainWindow(QMainWindow):
             return
 
         # 更新右侧预览标签
-        scaled = pixmap.scaled(
-            self.imageLabel.size() if self.imageLabel.size() != QSize(0, 0) else pixmap.size(),
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        self.imageLabel.setPixmap(scaled)
+        self._update_image_label(pixmap)
 
         # 同时弹出独立对话框便于查看完整图像
         dlg = QDialog(self)
@@ -891,17 +1065,23 @@ class MainWindow(QMainWindow):
         if result.status == "success":
             msg = f"{title}完成"
             if title == "文件加载":
-                # 更新显示任务输入并自动展示第一张影像
-                self.current_numpy_files = result.outputs
-                self.task_manager.config.image_display_params["paths"] = result.outputs
-                if result.outputs:
-                    self.run_image_display()
-            elif title == "波段可视化":
-                if result.outputs:
-                    if hasattr(self, "display_image"):
-                        self.display_image(result.outputs[0])
-                    elif hasattr(self, "show_image"):
-                        self.show_image(result.outputs[0])
+                for o in result.outputs:
+                    if o not in self.current_numpy_files:
+                        self.current_numpy_files.append(o)
+                for path in self.current_image_files:
+                    name = os.path.basename(path)
+                    self.file_status[name] = "已加载"
+                    self.file_visibility.setdefault(name, True)
+                self._update_file_list()
+                self._refresh_display()
+            elif title == "图像处理":
+                for path in self.current_image_files:
+                    self.file_status[os.path.basename(path)] = "已处理"
+                self._update_file_list()
+            elif title == "分类":
+                for path in self.current_image_files:
+                    self.file_status[os.path.basename(path)] = "已分类"
+                self._update_file_list()
         else:
             msg = f"{title}失败: {result.message}"
         self.statusBar().showMessage(msg, 5000)
@@ -925,13 +1105,6 @@ class MainWindow(QMainWindow):
             base.update(override)
         worker = FileWorker(params=base)
         self._start_worker(worker, "文件加载")
-
-    def run_image_display(self, override: dict | None = None):
-        base = getattr(self.task_manager.config, "image_display_params", {}).copy()
-        if override:
-            base.update(override)
-        worker = DisplayWorker(params=base)
-        self._start_worker(worker, "波段可视化")
 
     def run_image_processing(self, override: dict | None = None):
         base = getattr(self.task_manager.config, "image_processing_params", {}).copy()
@@ -960,6 +1133,98 @@ class MainWindow(QMainWindow):
             base.update(override)
         worker = ClassificationWorker(params=base)
         self._start_worker(worker, "分类")
+
+    def run_feature_extraction(self, override: dict | None = None):
+        base = getattr(self.task_manager.config, "feature_extraction_params", {}).copy()
+        if override:
+            base.update(override)
+        worker = FeatureWorker(params=base)
+        self._start_worker(worker, "特征提取")
+
+    def run_evaluation(self, override: dict | None = None):
+        base = getattr(self.task_manager.config, "evaluation_params", {}).copy()
+        if override:
+            base.update(override)
+        worker = EvaluationWorker(params=base)
+        self._start_worker(worker, "精度评估")
+
+    def _show_side_list_menu(self, pos):
+        menu = QMenu(self.sideList)
+        act_remove = menu.addAction("移除选中")
+        act_clear = menu.addAction("清空列表")
+        action = menu.exec(self.sideList.mapToGlobal(pos))
+        if action == act_remove:
+            for item in self.sideList.selectedItems():
+                name = item.text().split(" - ")[0]
+                self.file_status.pop(name, None)
+                for i, p in enumerate(self.current_image_files):
+                    if os.path.basename(p) == name:
+                        self.current_image_files.pop(i)
+                        if i < len(self.current_numpy_files):
+                            self.current_numpy_files.pop(i)
+                        break
+                self.file_visibility.pop(name, None)
+            self._update_file_list()
+            self._refresh_display()
+        elif action == act_clear:
+            self.sideList.clear()
+            self.current_image_files.clear()
+            self.current_numpy_files.clear()
+            self.file_status.clear()
+            self.file_visibility.clear()
+            self._refresh_display()
+
+
+    def _update_file_list(self):
+        """在侧边栏刷新文件状态列表"""
+        self.sideList.blockSignals(True)
+        self.sideList.clear()
+        for path in self.current_image_files:
+            name = os.path.basename(path)
+            status = self.file_status.get(name, "")
+            item = QListWidgetItem(f"{name} - {status}")
+            visible = self.file_visibility.get(name, True)
+            item.setCheckState(Qt.CheckState.Checked if visible else Qt.CheckState.Unchecked)
+            self.sideList.addItem(item)
+        self.sideList.blockSignals(False)
+
+    def _on_side_item_changed(self, item: QListWidgetItem):
+        name = item.text().split(" - ")[0]
+        self.file_visibility[name] = item.checkState() == Qt.CheckState.Checked
+        self._refresh_display()
+
+    def _refresh_display(self):
+        # 优先在当前影像文件中查找可见项并显示
+        for img_path in self.current_image_files:
+            name = os.path.basename(img_path)
+            if self.file_visibility.get(name, True):
+                pix = self._load_raster_pixmap(img_path)
+                if pix:
+                    self._update_image_label(pix)
+                return
+
+        # 兼容旧逻辑：尝试从 display_pngs 映射展示生成的 PNG
+        for npy_path, png in self.display_pngs.items():
+            name = os.path.basename(npy_path)
+            if self.file_visibility.get(name, True) and os.path.exists(png):
+                pixmap = QPixmap(png)
+                if not pixmap.isNull():
+                    self._update_image_label(pixmap)
+                    return
+
+        # 没有任何可显示内容时清空
+        self.imageLabel.clear()
+        self.current_pixmap = None
+
+    def eventFilter(self, obj, event):
+        if obj is self.imageLabel and event.type() == event.Type.Resize and self.current_pixmap:
+            scaled = self.current_pixmap.scaled(
+                obj.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            self.imageLabel.setPixmap(scaled)
+        return super().eventFilter(obj, event)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
