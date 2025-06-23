@@ -22,17 +22,39 @@ if __package__ is None or __package__ == "":
             sys.path.insert(0, str(parent))
             break
 import os
+import shutil
 from PyQt6 import uic
 from PyQt6.QtWidgets import (
-    QApplication, QMainWindow, QProgressDialog, QDialog, QFileDialog,
-    QListWidget, QVBoxLayout, QLabel, QGraphicsScene, QCheckBox,
-    QLineEdit, QPushButton, QSpinBox, QComboBox, QSizePolicy,
-    QDockWidget, QMenu, QListWidgetItem
+    QApplication,
+    QMainWindow,
+    QProgressDialog,
+    QDialog,
+    QFileDialog,
+    QListWidget,
+    QVBoxLayout,
+    QLabel,
+    QGraphicsScene,
+    QCheckBox,
+    QLineEdit,
+    QPushButton,
+    QSpinBox,
+    QComboBox,
+    QSizePolicy,
+    QDockWidget,
+    QMenu,
+    QListWidgetItem,
+    QGraphicsView,
+    QGraphicsPixmapItem,
 )
-from PyQt6.QtGui import QPixmap, QStandardItemModel, QStandardItem, QImage
-from PyQt6.QtCore import Qt, QSize
+from PyQt6.QtGui import (
+    QPixmap,
+    QStandardItemModel,
+    QStandardItem,
+    QImage,
+    QCloseEvent,
+)
+from PyQt6.QtCore import Qt, QThread, QTimer, QRectF
 from functools import partial
-from PyQt6.QtCore import QThread
 import numpy as np
 import rasterio
 from src.workers.processing_worker import ProcessingWorker
@@ -46,6 +68,53 @@ from shapely.geometry import Point, LineString, Polygon
 from src.processing.task_manager import TaskManager
 from src.processing.task_result import TaskResult
 
+
+class ImageViewer(QGraphicsView):
+    """可缩放和拖动的图像查看器"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        scene = QGraphicsScene(self)
+        self.setScene(scene)
+        self._pix_item = QGraphicsPixmapItem()
+        # 防止图像项截获鼠标事件
+        self._pix_item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+        scene.addItem(self._pix_item)
+        self._zoom = 1.0
+        self.setTransformationAnchor(
+            QGraphicsView.ViewportAnchor.AnchorUnderMouse
+        )
+        self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+        # 启用手形拖动模式
+        self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+
+    def setPixmap(self, pix: QPixmap) -> None:
+        self._pix_item.setPixmap(pix)
+        # 根据图像尺寸调整场景范围，确保可拖动
+        self.scene().setSceneRect(self._pix_item.boundingRect())
+        self.resetTransform()
+        self._zoom = 1.0
+        self.fitInView(self._pix_item, Qt.AspectRatioMode.KeepAspectRatio)
+
+    def clear(self) -> None:
+        self._pix_item.setPixmap(QPixmap())
+        self.scene().setSceneRect(QRectF())
+        self.resetTransform()
+        self._zoom = 1.0
+
+    def resizeEvent(self, event) -> None:
+        if self._pix_item.pixmap() and not self._pix_item.pixmap().isNull() and self._zoom == 1.0:
+            self.fitInView(self._pix_item, Qt.AspectRatioMode.KeepAspectRatio)
+        super().resizeEvent(event)
+
+    def wheelEvent(self, event):
+        if self._pix_item.pixmap().isNull():
+            return
+        factor = 1.25 if event.angleDelta().y() > 0 else 0.8
+        self._zoom *= factor
+        self.scale(factor, factor)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -58,7 +127,11 @@ class MainWindow(QMainWindow):
         
         # 进度对话框
         self.progressDialog = QProgressDialog(self)
-        self.progressDialog.setAutoClose(False)
+        self.progressDialog.setWindowModality(Qt.WindowModality.WindowModal)
+        self.progressDialog.setCancelButtonText("取消")
+        self.progressDialog.setAutoClose(True)
+        self.progressDialog.setAutoReset(True)
+        self.progressDialog.setMinimumDuration(0)
         self.progressDialog.setLabelText("准备中…")
         self.progressDialog.hide()
         # 取消按钮关闭当前线程
@@ -70,6 +143,8 @@ class MainWindow(QMainWindow):
         self.current_image_files: list[str] = []
         # 对应由 file_operation 生成的 numpy 文件列表
         self.current_numpy_files: list[str] = []
+        # 记录运行中产生的临时文件
+        self.temp_files: list[str] = []
 
         # 对应 UI 文件目录
         self.ui_dir = os.path.join(os.path.dirname(__file__), 'ui', 'yaogan')
@@ -98,15 +173,11 @@ class MainWindow(QMainWindow):
         self.sideList.itemChanged.connect(self._on_side_item_changed)
         self.sideList.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
 
-        # 在主界面右侧用于显示结果的 QLabel
-        self.imageLabel = QLabel(self.frame_2)
-        self.imageLabel.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.imageLabel.setScaledContents(False)
-        # PyQt6 将 QSizePolicy 的枚举值放在 Policy 名称空间下
+        # 在主界面右侧用于显示结果的图像查看器
+        self.imageLabel = ImageViewer(self.frame_2)
         self.imageLabel.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
-        self.imageLabel.installEventFilter(self)
         self.current_pixmap: QPixmap | None = None
         right_layout = QVBoxLayout(self.frame_2)
         right_layout.setContentsMargins(0, 0, 0, 0)
@@ -286,24 +357,33 @@ class MainWindow(QMainWindow):
         widget.addItems(files)
 
     def show_save_image_dialog(self):
-        path = os.path.join(self.ui_dir, 'File', 'save_image_as.ui')
-        dialog = QDialog(self)
-        uic.loadUi(path, dialog)
-        if hasattr(dialog, 'pushButton'):
-            dialog.pushButton.clicked.connect(lambda: self._save_image(dialog))
-        if hasattr(dialog, 'pushButton_2'):
-            dialog.pushButton_2.clicked.connect(dialog.reject)
-        dialog.exec()
-
-    def _save_image(self, dialog: QDialog):
-        directory = QFileDialog.getExistingDirectory(self, '选择保存目录')
-        if not directory:
+        items = self.sideList.selectedItems()
+        if not items:
+            self.statusBar().showMessage('请先在左侧选择要保存的文件', 5000)
             return
-        if hasattr(dialog, 'lineEdit'):
-            dialog.lineEdit.setText(directory)
-        params = {'save_dir': directory}
-        self.run_file_save(params)
-        dialog.accept()
+        name = items[0].text().split(' - ')[0]
+        src_path = next(
+            (p for p in self.current_image_files if os.path.basename(p) == name),
+            '',
+        )
+        if not src_path or not os.path.exists(src_path):
+            self.statusBar().showMessage('源文件不存在', 5000)
+            return
+        dest, _ = QFileDialog.getSaveFileName(
+            self,
+            '保存文件为',
+            name,
+            'TIFF Files (*.tif *.tiff);;All Files (*)',
+        )
+        if not dest:
+            return
+        try:
+            shutil.copy2(src_path, dest)
+            self.statusBar().showMessage(f'已保存到 {dest}', 5000)
+            self.file_status[name] = '已保存'
+            self._update_file_list()
+        except Exception as e:
+            self.statusBar().showMessage(f'保存失败: {e}', 5000)
 
     def show_save_vector_dialog(self):
         path = os.path.join(self.ui_dir, 'File', 'save_vector_as.ui')
@@ -483,7 +563,58 @@ class MainWindow(QMainWindow):
             bands = [int(b) for b in text.replace(' ', '').split(',') if b]
         if not bands:
             bands = [1]
-        self._preview_bands(bands)
+
+        if not self.current_image_files:
+            self.statusBar().showMessage('请先加载影像文件', 5000)
+            dialog.reject()
+            return
+
+        img_path = self.current_image_files[0]
+        try:
+            from src.processing.image_display.band_extraction import extract_band
+            arr = extract_band(img_path, bands)
+        except Exception as e:
+            self.statusBar().showMessage(f'波段提取失败: {e}', 5000)
+            dialog.reject()
+            return
+
+        import tempfile
+        import rasterio
+        import numpy as np
+        import os
+
+        out_dir = self.task_manager.config.file_operation_params['output_dir']
+        os.makedirs(out_dir, exist_ok=True)
+        prefix = f"band_{'_'.join(str(b) for b in bands)}_"
+        tmp_tif = tempfile.mktemp(prefix=prefix, suffix='.tif', dir=out_dir)
+
+        with rasterio.open(img_path) as src:
+            meta = src.meta.copy()
+            count = arr.shape[2] if arr.ndim == 3 else 1
+            meta.update(count=count, dtype=arr.dtype)
+            with rasterio.open(tmp_tif, 'w', **meta) as dst:
+                if arr.ndim == 2:
+                    dst.write(arr, 1)
+                else:
+                    dst.write(arr.transpose(2, 0, 1))
+
+        npy_path = os.path.splitext(tmp_tif)[0] + '.npy'
+        save_arr = arr if arr.ndim == 3 else arr[np.newaxis, ...]
+        np.save(npy_path, save_arr)
+
+        self.temp_files.extend([tmp_tif, npy_path])
+
+        self.current_image_files.append(tmp_tif)
+        self.current_numpy_files.append(npy_path)
+        name = os.path.basename(tmp_tif)
+        self.file_status[name] = '临时'
+        self.file_visibility[name] = True
+        self._update_file_list()
+
+        pix = self._load_raster_pixmap(tmp_tif)
+        if pix:
+            self._update_image_label(pix)
+
         dialog.accept()
 
     def show_band_synthesis_dialog(self):
@@ -508,7 +639,53 @@ class MainWindow(QMainWindow):
         except Exception:
             dialog.reject()
             return
-        self._preview_bands([b1, b2, b3])
+
+        if not self.current_image_files:
+            self.statusBar().showMessage('请先加载影像文件', 5000)
+            dialog.reject()
+            return
+
+        img_path = self.current_image_files[0]
+        try:
+            from src.processing.image_display.band_synthesis import synthesize_band
+            img = synthesize_band(img_path, (b1, b2, b3))
+        except Exception as e:
+            self.statusBar().showMessage(f'波段合成失败: {e}', 5000)
+            dialog.reject()
+            return
+
+        import tempfile
+        import rasterio
+        import numpy as np
+        import os
+
+        out_dir = self.task_manager.config.file_operation_params['output_dir']
+        os.makedirs(out_dir, exist_ok=True)
+        prefix = f"syn_{b1}{b2}{b3}_"
+        tmp_tif = tempfile.mktemp(prefix=prefix, suffix='.tif', dir=out_dir)
+
+        with rasterio.open(img_path) as src:
+            meta = src.meta.copy()
+            meta.update(count=3, dtype=img.dtype)
+            with rasterio.open(tmp_tif, 'w', **meta) as dst:
+                dst.write(img.transpose(2, 0, 1))
+
+        npy_path = os.path.splitext(tmp_tif)[0] + '.npy'
+        np.save(npy_path, img.transpose(2, 0, 1))
+
+        self.temp_files.extend([tmp_tif, npy_path])
+
+        self.current_image_files.append(tmp_tif)
+        self.current_numpy_files.append(npy_path)
+        name = os.path.basename(tmp_tif)
+        self.file_status[name] = '临时'
+        self.file_visibility[name] = True
+        self._update_file_list()
+
+        pix = self._load_raster_pixmap(tmp_tif)
+        if pix:
+            self._update_image_label(pix)
+
         dialog.accept()
 
     def show_histogram_dialog(self):
@@ -971,12 +1148,7 @@ class MainWindow(QMainWindow):
     def _update_image_label(self, pixmap: QPixmap) -> None:
         """在右侧标签展示给定的图像"""
         self.current_pixmap = pixmap
-        scaled = pixmap.scaled(
-            self.imageLabel.size() if self.imageLabel.size() != QSize(0, 0) else pixmap.size(),
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        self.imageLabel.setPixmap(scaled)
+        self.imageLabel.setPixmap(pixmap)
 
     def _load_raster_pixmap(self, path: str, bands: list[int] | None = None) -> QPixmap | None:
         """读取遥感影像并转换为 QPixmap"""
@@ -1000,11 +1172,27 @@ class MainWindow(QMainWindow):
 
         if data.shape[0] == 1:
             img = data[0]
-            qimg = QImage(img.data, img.shape[1], img.shape[0], img.strides[0], QImage.Format.Format_Grayscale8)
+            qimg = QImage(
+                img.tobytes(),
+                img.shape[1],
+                img.shape[0],
+                img.strides[0],
+                QImage.Format.Format_Grayscale8,
+            )
         else:
-            img = np.transpose(data, (1, 2, 0))
-            qimg = QImage(img.data, img.shape[1], img.shape[0], img.strides[0], QImage.Format.Format_RGB888)
-        return QPixmap.fromImage(qimg.copy())
+            img = np.ascontiguousarray(np.transpose(data, (1, 2, 0)))
+            qimg = QImage(
+                img.tobytes(),
+                img.shape[1],
+                img.shape[0],
+                img.strides[0],
+                QImage.Format.Format_RGB888,
+            )
+
+        pixmap = QPixmap.fromImage(qimg.copy())
+        if pixmap.isNull():
+            return None
+        return pixmap
 
     def _preview_bands(self, bands: list[int]):
         """根据指定波段在界面预览当前文件"""
@@ -1058,6 +1246,7 @@ class MainWindow(QMainWindow):
 
         self.progressDialog.setLabelText(f"{title}…")
         self.progressDialog.show()
+        QTimer.singleShot(2000, self.progressDialog.hide)
         worker.start()
 
     def _handle_result(self, title: str, result: TaskResult):
@@ -1225,6 +1414,18 @@ class MainWindow(QMainWindow):
             )
             self.imageLabel.setPixmap(scaled)
         return super().eventFilter(obj, event)
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        for path in getattr(self, "temp_files", []):
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+                hdr = os.path.splitext(path)[0] + ".hdr"
+                if os.path.exists(hdr):
+                    os.remove(hdr)
+            except Exception:
+                pass
+        super().closeEvent(event)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
