@@ -53,9 +53,12 @@ from PyQt6.QtGui import (
     QStandardItemModel,
     QStandardItem,
     QImage,
+    QPolygonF,
+    QPen,
+    QColor,
     QCloseEvent,
 )
-from PyQt6.QtCore import Qt, QThread, QTimer, QRectF
+from PyQt6.QtCore import Qt, QThread, QTimer, QRectF, QPointF
 from functools import partial
 import numpy as np
 import rasterio
@@ -88,6 +91,54 @@ class ImageViewer(QGraphicsView):
         self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         # 启用手形拖动模式
         self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+        # ROI 绘制相关
+        self._drawing_roi = False
+        self._roi_points: list[QPointF] = []
+        self._roi_item = None
+        self.on_roi_complete = None
+
+    def start_roi_drawing(self, callback=None):
+        """进入 ROI 绘制模式"""
+        self._drawing_roi = True
+        self._roi_points.clear()
+        if self._roi_item is not None:
+            self.scene().removeItem(self._roi_item)
+            self._roi_item = None
+        self.on_roi_complete = callback
+        self.setDragMode(QGraphicsView.DragMode.NoDrag)
+
+    def _finish_roi_drawing(self):
+        self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+        self._drawing_roi = False
+        if self._roi_item is not None:
+            self.scene().removeItem(self._roi_item)
+            self._roi_item = None
+        pts = [(p.x(), p.y()) for p in self._roi_points]
+        self._roi_points.clear()
+        if len(pts) >= 3:
+            poly = Polygon(pts)
+        else:
+            poly = None
+        if self.on_roi_complete:
+            cb = self.on_roi_complete
+            self.on_roi_complete = None
+            cb(poly)
+
+    def mousePressEvent(self, event):
+        if self._drawing_roi:
+            if event.button() == Qt.MouseButton.LeftButton:
+                pt = self.mapToScene(event.pos())
+                self._roi_points.append(pt)
+                if self._roi_item is None:
+                    pen = QPen(QColor("red"))
+                    pen.setWidth(2)
+                    self._roi_item = self.scene().addPolygon(QPolygonF(self._roi_points), pen)
+                else:
+                    self._roi_item.setPolygon(QPolygonF(self._roi_points))
+            elif event.button() == Qt.MouseButton.RightButton:
+                self._finish_roi_drawing()
+            return
+        super().mousePressEvent(event)
 
     def setPixmap(self, pix: QPixmap) -> None:
         self._pix_item.setPixmap(pix)
@@ -145,8 +196,13 @@ class MainWindow(QMainWindow):
         self.current_image_files: list[str] = []
         # 对应由 file_operation 生成的 numpy 文件列表
         self.current_numpy_files: list[str] = []
-         # 记录运行中产生的临时文件
+        # 当前生成的矢量文件列表
+        self.current_vector_files: list[str] = []
+        # 记录运行中产生的临时文件
         self.temp_files: list[str] = []
+        # 当前 ROI 对象及其临时文件路径
+        self.current_roi = None
+        self.current_roi_path: str | None = None
 
         # 对应 UI 文件目录
         self.ui_dir = os.path.join(os.path.dirname(__file__), 'ui', 'yaogan')
@@ -233,6 +289,14 @@ class MainWindow(QMainWindow):
             'actionVerify_Sample_Accuracy_Test': self.show_evaluation_dialog,
             'actionGenerate_Accuracy_Evaluation_Table': self.show_evaluation_dialog,
         }
+        vector_actions = {
+            'actionCreatingROI': self.show_create_roi_dialog,
+            'actionSaveROIAs':   self.show_save_roi_dialog,
+            'actionEditingROI':  self.show_edit_roi_dialog,
+            'actionPoint':       self.show_create_point_dialog,
+            'actionPolyline':    self.show_create_polyline_dialog,
+            'actionPolygon':     self.show_create_polygon_dialog,
+        }
         for action_name, slot in file_actions.items():
             if hasattr(self, action_name):
                 getattr(self, action_name).triggered.connect(slot)
@@ -246,6 +310,10 @@ class MainWindow(QMainWindow):
                 getattr(self, action_name).triggered.connect(slot)
 
         for action_name, slot in evaluation_actions.items():
+            if hasattr(self, action_name):
+                getattr(self, action_name).triggered.connect(slot)
+
+        for action_name, slot in vector_actions.items():
             if hasattr(self, action_name):
                 getattr(self, action_name).triggered.connect(slot)
 
@@ -367,8 +435,17 @@ class MainWindow(QMainWindow):
         selected = [os.path.join(directory, item.text()) for item in widget.selectedItems()]
         if not selected:
             return
-        params = {'input_paths': selected}
-        self.run_vector_processing(params)
+
+        for path in selected:
+            if path not in self.current_vector_files:
+                self.current_vector_files.append(path)
+            name = os.path.basename(path)
+            self.file_status[name] = '已加载'
+            self.file_visibility.setdefault(name, False)
+
+        self._update_file_list()
+        self._refresh_display()
+
         dialog.accept()
 
     def _populate_vector_list(self, widget: QListWidget, directory: str):
@@ -411,48 +488,74 @@ class MainWindow(QMainWindow):
 
 
     def show_save_vector_dialog(self):
-        path = os.path.join(self.ui_dir, 'File', 'save_vector_as.ui')
-        dialog = QDialog(self)
-        uic.loadUi(path, dialog)
-        if hasattr(dialog, 'pushButton'):
-            dialog.pushButton.clicked.connect(lambda: self._save_vector(dialog))
-        if hasattr(dialog, 'pushButton_2'):
-            dialog.pushButton_2.clicked.connect(dialog.reject)
-        dialog.exec()
-
-    def _save_vector(self, dialog: QDialog):
-        directory = QFileDialog.getExistingDirectory(self, '选择保存目录')
-        if not directory:
+        items = self.sideList.selectedItems()
+        if not items:
+            self.statusBar().showMessage('请先在左侧选择要保存的矢量文件', 5000)
             return
-        if hasattr(dialog, 'lineEdit'):
-            dialog.lineEdit.setText(directory)
-        params = {'output_dir': directory}
-        self.run_vector_processing(params)
-        dialog.accept()
+        name = items[0].text().split(' - ')[0]
+        src_path = next((p for p in self.current_vector_files if os.path.basename(p) == name), '')
+        if not src_path or not os.path.exists(src_path):
+            self.statusBar().showMessage('源文件不存在', 5000)
+            return
+        dest, _ = QFileDialog.getSaveFileName(
+            self,
+            '保存矢量文件为',
+            name,
+            'Shapefile (*.shp);;GeoJSON (*.geojson);;All Files (*)',
+        )
+        if not dest:
+            return
+        try:
+            base_src, ext_src = os.path.splitext(src_path)
+            base_dest, ext_dest = os.path.splitext(dest)
+            if ext_src == '.shp':
+                for suf in ('.shp', '.shx', '.dbf', '.cpg', '.prj'):
+                    sp = base_src + suf
+                    if os.path.exists(sp):
+                        dp = base_dest + suf
+                        shutil.copy2(sp, dp)
+            else:
+                shutil.copy2(src_path, dest)
+            self.statusBar().showMessage(f'已保存到 {dest}', 5000)
+            self.file_status[name] = '已保存'
+            self._update_file_list()
+        except Exception as e:
+            self.statusBar().showMessage(f'保存失败: {e}', 5000)
+
+
 
     # ------ Vector & ROI 操作 ------
     def show_create_roi_dialog(self):
-        dlg = QDialog(self)
-        dlg.setWindowTitle('Create ROI')
-        layout = QVBoxLayout(dlg)
-        edit = QLineEdit(dlg)
-        edit.setPlaceholderText('x1,y1; x2,y2; x3,y3')
-        btn = QPushButton('Create', dlg)
-        layout.addWidget(edit)
-        layout.addWidget(btn)
+        if not self.current_image_files:
+            self.statusBar().showMessage('请先加载影像文件', 5000)
+            return
+        self.statusBar().showMessage('左键绘制 ROI，右键结束', 0)
+        self.imageLabel.start_roi_drawing(self._on_roi_drawn)
 
-        def act():
-            try:
-                pts = [tuple(map(float, p.split(','))) for p in edit.text().split(';') if p.strip()]
-                from src.processing.vector_processing.roi_creator import create_roi_polygon
-                self.current_roi = create_roi_polygon(pts)
-                self.statusBar().showMessage('ROI 已创建', 5000)
-                dlg.accept()
-            except Exception as e:
-                self.statusBar().showMessage(f'创建失败: {e}', 5000)
-
-        btn.clicked.connect(act)
-        dlg.exec()
+    def _on_roi_drawn(self, poly: Polygon | None):
+        """ROI 绘制完成后的回调"""
+        self.statusBar().clearMessage()
+        if poly is None:
+            self.statusBar().showMessage('ROI 绘制取消或点数不足', 5000)
+            return
+        self.current_roi = poly
+        try:
+            import tempfile
+            from src.processing.vector_processing.roi_saver import save_roi_to_file
+            out_dir = self.task_manager.config.vector_processing_params['output_dir']
+            os.makedirs(out_dir, exist_ok=True)
+            tmp_path = tempfile.mktemp(prefix='roi_', suffix='.shp', dir=out_dir)
+            save_roi_to_file(self.current_roi, tmp_path)
+            self.temp_files.append(tmp_path)
+            self.current_vector_files.append(tmp_path)
+            self.current_roi_path = tmp_path
+            name = os.path.basename(tmp_path)
+            self.file_status[name] = '临时'
+            self.file_visibility[name] = False
+            self._update_file_list()
+            self.statusBar().showMessage('ROI 已创建', 5000)
+        except Exception as e:
+            self.statusBar().showMessage(f'创建失败: {e}', 5000)
 
     def show_edit_roi_dialog(self):
         if self.current_roi is None:
@@ -472,6 +575,10 @@ class MainWindow(QMainWindow):
                 pts = [tuple(map(float, p.split(','))) for p in edit.text().split(';') if p.strip()]
                 from src.processing.vector_processing.roi_editor import edit_roi_polygon
                 self.current_roi = edit_roi_polygon(self.current_roi, pts)
+                from src.processing.vector_processing.roi_saver import save_roi_to_file
+                if self.current_roi_path:
+                    save_roi_to_file(self.current_roi, self.current_roi_path)
+                    self._update_file_list()
                 self.statusBar().showMessage('ROI 已更新', 5000)
                 dlg.accept()
             except Exception as e:
@@ -490,6 +597,12 @@ class MainWindow(QMainWindow):
         try:
             from src.processing.vector_processing.roi_saver import save_roi_to_file
             save_roi_to_file(self.current_roi, path)
+            name = os.path.basename(path)
+            if path not in self.current_vector_files:
+                self.current_vector_files.append(path)
+            self.file_status[name] = '已保存'
+            self.file_visibility[name] = False
+            self._update_file_list()
             self.statusBar().showMessage(f'ROI 已保存到 {path}', 5000)
         except Exception as e:
             self.statusBar().showMessage(f'保存失败: {e}', 5000)
@@ -1429,6 +1542,8 @@ class MainWindow(QMainWindow):
         try:
             if ext in ('.npy', '.pkl', '.pickle'):
                 import pickle
+            if ext in ('.shp', '.geojson', '.gpkg', '.json'):
+                return self._load_vector_pixmap(path)
             if ext in ('.png', '.jpg', '.jpeg'):
                 pix = QPixmap(path)
                 return pix if not pix.isNull() else None
@@ -1489,6 +1604,43 @@ class MainWindow(QMainWindow):
         if pixmap.isNull():
             return None
         return pixmap
+
+    def _load_vector_pixmap(self, path: str) -> QPixmap | None:
+        """读取矢量文件并转换为 QPixmap"""
+        try:
+            import geopandas as gpd
+            import matplotlib.pyplot as plt
+            from io import BytesIO
+            import warnings
+            from rasterio.errors import NotGeoreferencedWarning
+
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", category=NotGeoreferencedWarning)
+                gdf = gpd.read_file(path)
+
+            fig, ax = plt.subplots(figsize=(4, 4))
+            ax.axis("off")
+            try:
+                # GeoPandas 早期版本在纬度接近 90 度时使用 ``aspect='auto'`` 会
+                # 计算出无穷大的纵横比，导致 ``matplotlib`` 报错。这里改为传入
+                # ``aspect=None``，跳过 GeoPandas 的自动设置，再手动设为 ``auto``。
+                gdf.plot(ax=ax, facecolor="none", edgecolor="red", aspect=None)
+            except Exception as e:
+                plt.close(fig)
+                raise e
+
+            ax.set_aspect("auto")
+
+            buf = BytesIO()
+            fig.savefig(buf, format="png", bbox_inches="tight")
+            plt.close(fig)
+            buf.seek(0)
+            pix = QPixmap()
+            pix.loadFromData(buf.getvalue())
+            return pix if not pix.isNull() else None
+        except Exception as e:
+            self.statusBar().showMessage(f"矢量显示失败: {e}", 5000)
+            return None
 
     def _load_image_array(self, path: str):
         """读取影像或数组文件为 ndarray"""
@@ -1597,7 +1749,7 @@ class MainWindow(QMainWindow):
 
     def _preview_bands(self, bands: list[int]):
         """根据指定波段在界面预览当前文件"""
-        for path in self.current_image_files:
+        for path in self.current_image_files + self.current_vector_files:
             name = os.path.basename(path)
             if self.file_visibility.get(name, True):
                 pix = self._load_raster_pixmap(path, bands)
@@ -1672,6 +1824,15 @@ class MainWindow(QMainWindow):
                 for path in self.current_image_files:
                     self.file_status[os.path.basename(path)] = "已分类"
                 self._update_file_list()
+            elif title == "矢量处理":
+                for o in result.outputs:
+                    if o not in self.current_vector_files:
+                        self.current_vector_files.append(o)
+                    name = os.path.basename(o)
+                    self.file_status[name] = '已保存'
+                    self.file_visibility.setdefault(name, False)
+                self._update_file_list()
+                self._refresh_display()
         else:
             msg = f"{title}失败: {result.message}"
         self.statusBar().showMessage(msg, 5000)
@@ -1747,12 +1908,19 @@ class MainWindow(QMainWindow):
             for item in self.sideList.selectedItems():
                 name = item.text().split(" - ")[0]
                 self.file_status.pop(name, None)
+                removed = False
                 for i, p in enumerate(self.current_image_files):
                     if os.path.basename(p) == name:
                         self.current_image_files.pop(i)
                         if i < len(self.current_numpy_files):
                             self.current_numpy_files.pop(i)
+                        removed = True
                         break
+                if not removed:
+                    for i, p in enumerate(self.current_vector_files):
+                        if os.path.basename(p) == name:
+                            self.current_vector_files.pop(i)
+                            break
                 self.file_visibility.pop(name, None)
             self._update_file_list()
             self._refresh_display()
@@ -1760,6 +1928,7 @@ class MainWindow(QMainWindow):
             self.sideList.clear()
             self.current_image_files.clear()
             self.current_numpy_files.clear()
+            self.current_vector_files.clear()
             self.file_status.clear()
             self.file_visibility.clear()
             self._refresh_display()
@@ -1769,7 +1938,7 @@ class MainWindow(QMainWindow):
         """在侧边栏刷新文件状态列表"""
         self.sideList.blockSignals(True)
         self.sideList.clear()
-        for path in self.current_image_files:
+        for path in self.current_image_files + self.current_vector_files:
             name = os.path.basename(path)
             status = self.file_status.get(name, "")
             item = QListWidgetItem(f"{name} - {status}")
@@ -1789,6 +1958,15 @@ class MainWindow(QMainWindow):
             name = os.path.basename(img_path)
             if self.file_visibility.get(name, True):
                 pix = self._load_raster_pixmap(img_path)
+                if pix:
+                    self._update_image_label(pix)
+                return
+
+        # 如果没有可见影像，尝试显示矢量文件
+        for vec_path in self.current_vector_files:
+            name = os.path.basename(vec_path)
+            if self.file_visibility.get(name, True):
+                pix = self._load_vector_pixmap(vec_path)
                 if pix:
                     self._update_image_label(pix)
                 return
@@ -1848,6 +2026,11 @@ class MainWindow(QMainWindow):
                 hdr = os.path.splitext(path)[0] + ".hdr"
                 if os.path.exists(hdr):
                     os.remove(hdr)
+                base, ext = os.path.splitext(path)
+                for extra in (".shx", ".dbf", ".cpg", ".prj"):
+                    side = base + extra
+                    if os.path.exists(side):
+                        os.remove(side)
             except Exception:
                 pass
         super().closeEvent(event)
