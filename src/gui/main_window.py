@@ -22,17 +22,44 @@ if __package__ is None or __package__ == "":
             sys.path.insert(0, str(parent))
             break
 import os
+import shutil
 from PyQt6 import uic
 from PyQt6.QtWidgets import (
-    QApplication, QMainWindow, QProgressDialog, QDialog, QFileDialog,
-    QListWidget, QVBoxLayout, QLabel, QGraphicsScene, QCheckBox,
-    QLineEdit, QPushButton, QSpinBox, QComboBox, QSizePolicy,
-    QDockWidget, QMenu, QListWidgetItem
+    QApplication,
+    QMainWindow,
+    QProgressDialog,
+    QDialog,
+    QFileDialog,
+    QListWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QLabel,
+    QGraphicsScene,
+    QCheckBox,
+    QLineEdit,
+    QPushButton,
+    QSpinBox,
+    QComboBox,
+    QSizePolicy,
+    QDockWidget,
+    QMenu,
+    QListWidgetItem,
+    QGraphicsView,
+    QGraphicsPixmapItem,
+    QMessageBox,
 )
-from PyQt6.QtGui import QPixmap, QStandardItemModel, QStandardItem, QImage
-from PyQt6.QtCore import Qt, QSize
+from PyQt6.QtGui import (
+    QPixmap,
+    QStandardItemModel,
+    QStandardItem,
+    QImage,
+    QPolygonF,
+    QPen,
+    QColor,
+    QCloseEvent,
+)
+from PyQt6.QtCore import Qt, QThread, QTimer, QRectF, QPointF
 from functools import partial
-from PyQt6.QtCore import QThread
 import numpy as np
 import rasterio
 from src.workers.processing_worker import ProcessingWorker
@@ -46,6 +73,119 @@ from shapely.geometry import Point, LineString, Polygon
 from src.processing.task_manager import TaskManager
 from src.processing.task_result import TaskResult
 
+
+def _load_array_from_pkl(path: str):
+    """从 .pkl 文件中提取数组"""
+    import pickle
+    with open(path, 'rb') as f:
+        obj = pickle.load(f)
+    if isinstance(obj, dict):
+        for k in ('features', 'data', 'array', 'image', 'arr'):
+            if k in obj:
+                return obj[k]
+        if len(obj) == 1:
+            val = next(iter(obj.values()))
+            return val
+        return obj
+    if isinstance(obj, (list, tuple)):
+        return obj[0]
+    return obj
+
+class ImageViewer(QGraphicsView):
+    """可缩放和拖动的图像查看器"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        scene = QGraphicsScene(self)
+        self.setScene(scene)
+        self._pix_item = QGraphicsPixmapItem()
+        # 防止图像项截获鼠标事件
+        self._pix_item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+        scene.addItem(self._pix_item)
+        self._zoom = 1.0
+        self.setTransformationAnchor(
+            QGraphicsView.ViewportAnchor.AnchorUnderMouse
+        )
+        self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+        # 启用手形拖动模式
+        self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+        # ROI 绘制相关
+        self._drawing_roi = False
+        self._roi_points: list[QPointF] = []
+        self._roi_item = None
+        self.on_roi_complete = None
+
+    def start_roi_drawing(self, callback=None):
+        """进入 ROI 绘制模式"""
+        self._drawing_roi = True
+        self._roi_points.clear()
+        if self._roi_item is not None:
+            self.scene().removeItem(self._roi_item)
+            self._roi_item = None
+        self.on_roi_complete = callback
+        self.setDragMode(QGraphicsView.DragMode.NoDrag)
+
+    def _finish_roi_drawing(self):
+        self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+        self._drawing_roi = False
+        if self._roi_item is not None:
+            self.scene().removeItem(self._roi_item)
+            self._roi_item = None
+        pts = [(p.x(), p.y()) for p in self._roi_points]
+        self._roi_points.clear()
+        if len(pts) >= 3:
+            poly = Polygon(pts)
+        else:
+            poly = None
+        if self.on_roi_complete:
+            cb = self.on_roi_complete
+            self.on_roi_complete = None
+            cb(poly)
+
+    def mousePressEvent(self, event):
+        if self._drawing_roi:
+            if event.button() == Qt.MouseButton.LeftButton:
+                pt = self.mapToScene(event.pos())
+                self._roi_points.append(pt)
+                if self._roi_item is None:
+                    pen = QPen(QColor("red"))
+                    pen.setWidth(2)
+                    self._roi_item = self.scene().addPolygon(QPolygonF(self._roi_points), pen)
+                else:
+                    self._roi_item.setPolygon(QPolygonF(self._roi_points))
+            elif event.button() == Qt.MouseButton.RightButton:
+                self._finish_roi_drawing()
+            return
+        super().mousePressEvent(event)
+
+    def setPixmap(self, pix: QPixmap) -> None:
+        self._pix_item.setPixmap(pix)
+        # 根据图像尺寸调整场景范围，确保可拖动
+        self.scene().setSceneRect(self._pix_item.boundingRect())
+        self.resetTransform()
+        self._zoom = 1.0
+        self.fitInView(self._pix_item, Qt.AspectRatioMode.KeepAspectRatio)
+
+    def clear(self) -> None:
+        self._pix_item.setPixmap(QPixmap())
+        self.scene().setSceneRect(QRectF())
+        self.resetTransform()
+        self._zoom = 1.0
+
+    def resizeEvent(self, event) -> None:
+        if self._pix_item.pixmap() and not self._pix_item.pixmap().isNull() and self._zoom == 1.0:
+            self.fitInView(self._pix_item, Qt.AspectRatioMode.KeepAspectRatio)
+        super().resizeEvent(event)
+
+    def wheelEvent(self, event):
+        if self._pix_item.pixmap().isNull():
+            return
+        factor = 1.25 if event.angleDelta().y() > 0 else 0.8
+        self._zoom *= factor
+        self.scale(factor, factor)
+
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -58,7 +198,11 @@ class MainWindow(QMainWindow):
         
         # 进度对话框
         self.progressDialog = QProgressDialog(self)
-        self.progressDialog.setAutoClose(False)
+        self.progressDialog.setWindowModality(Qt.WindowModality.WindowModal)
+        self.progressDialog.setCancelButtonText("取消")
+        self.progressDialog.setAutoClose(True)
+        self.progressDialog.setAutoReset(True)
+        self.progressDialog.setMinimumDuration(0)
         self.progressDialog.setLabelText("准备中…")
         self.progressDialog.hide()
         # 取消按钮关闭当前线程
@@ -66,10 +210,17 @@ class MainWindow(QMainWindow):
 
         # 当前运行的后台线程引用，避免被垃圾回收
         self.current_worker: QThread | None = None
-         # 当前打开的原始影像文件列表(.tif 等)
+        # 当前打开的原始影像文件列表(.tif 等)
         self.current_image_files: list[str] = []
         # 对应由 file_operation 生成的 numpy 文件列表
         self.current_numpy_files: list[str] = []
+        # 当前生成的矢量文件列表
+        self.current_vector_files: list[str] = []
+        # 记录运行中产生的临时文件
+        self.temp_files: list[str] = []
+        # 当前 ROI 对象及其临时文件路径
+        self.current_roi = None
+        self.current_roi_path: str | None = None
 
         # 对应 UI 文件目录
         self.ui_dir = os.path.join(os.path.dirname(__file__), 'ui', 'yaogan')
@@ -98,15 +249,11 @@ class MainWindow(QMainWindow):
         self.sideList.itemChanged.connect(self._on_side_item_changed)
         self.sideList.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
 
-        # 在主界面右侧用于显示结果的 QLabel
-        self.imageLabel = QLabel(self.frame_2)
-        self.imageLabel.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.imageLabel.setScaledContents(False)
-        # PyQt6 将 QSizePolicy 的枚举值放在 Policy 名称空间下
+        # 在主界面右侧用于显示结果的图像查看器
+        self.imageLabel = ImageViewer(self.frame_2)
         self.imageLabel.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
-        self.imageLabel.installEventFilter(self)
         self.current_pixmap: QPixmap | None = None
         right_layout = QVBoxLayout(self.frame_2)
         right_layout.setContentsMargins(0, 0, 0, 0)
@@ -136,7 +283,6 @@ class MainWindow(QMainWindow):
             'actionSharpening':      self.show_sharpening_dialog,
             'actionEdgedetection':   self.show_edge_dialog,
             'actionBandMath':        self.show_band_math_dialog,
-            'actionGenerating':      self.show_feature_extraction_dialog,
         }
 
         # 仅显示静态对话框的动作
@@ -160,6 +306,30 @@ class MainWindow(QMainWindow):
             'actionVerify_Sample_Accuracy_Test': self.show_evaluation_dialog,
             'actionGenerate_Accuracy_Evaluation_Table': self.show_evaluation_dialog,
         }
+        vector_actions = {
+            'actionCreatingROI': self.show_create_roi_dialog,
+            'actionSaveROIAs':   self.show_save_roi_dialog,
+            'actionEditingROI':  self.show_edit_roi_dialog,
+            'actionPoint':       self.show_create_point_dialog,
+            'actionPolyline':    self.show_create_polyline_dialog,
+            'actionPolygon':     self.show_create_polygon_dialog,
+        }
+
+        classification_actions = {
+            'actionMaximum_Likelihood':      lambda: self.show_classification_dialog('maximum_likelihood'),
+            'actionMinimum_Distance':       lambda: self.show_classification_dialog('minimum_distance'),
+            'actionSVM':                    lambda: self.show_classification_dialog('svm'),
+            'actionDecision_Tree':          lambda: self.show_classification_dialog('decision_tree'),
+            'actionRandom_Forest':          lambda: self.show_classification_dialog('random_forest'),
+            'actionK_means':                lambda: self.show_classification_dialog('kmeans'),
+            'actionISODATA':                lambda: self.show_classification_dialog('isodata'),
+            'actionDeep_leraning_Classification': self.show_deep_learning_classification_dialog,
+            'actionSave_Model_As':          self.show_save_model_as_dialog,
+            'actionCustom_Color':           self.show_custom_color_dialog,
+            'actionSmooth_Processing':      self.show_smooth_processing_dialog,
+            'actionDenoising':              self.show_denoising_dialog,
+            'actionGenerating':             self.show_generate_report_dialog,
+        }
         for action_name, slot in file_actions.items():
             if hasattr(self, action_name):
                 getattr(self, action_name).triggered.connect(slot)
@@ -173,6 +343,14 @@ class MainWindow(QMainWindow):
                 getattr(self, action_name).triggered.connect(slot)
 
         for action_name, slot in evaluation_actions.items():
+            if hasattr(self, action_name):
+                getattr(self, action_name).triggered.connect(slot)
+
+        for action_name, slot in vector_actions.items():
+            if hasattr(self, action_name):
+                getattr(self, action_name).triggered.connect(slot)
+
+        for action_name, slot in classification_actions.items():
             if hasattr(self, action_name):
                 getattr(self, action_name).triggered.connect(slot)
 
@@ -225,7 +403,13 @@ class MainWindow(QMainWindow):
         dialog.exec()
 
     def _populate_image_list(self, widget: QListWidget, directory: str):
-        files = [f for f in os.listdir(directory) if f.lower().endswith(('.tif', '.tiff'))]
+        files = [
+            f
+            for f in os.listdir(directory)
+            if f.lower().endswith(
+                ('.tif', '.tiff', '.npy', '.pkl', '.pickle')
+            )
+        ]
         widget.clear()
         widget.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
         widget.addItems(files)
@@ -234,11 +418,27 @@ class MainWindow(QMainWindow):
         selected = [os.path.join(directory, item.text()) for item in widget.selectedItems()]
         if not selected:
             return
+        
+        tif_paths: list[str] = []
         for f in selected:
+            ext = os.path.splitext(f)[1].lower()
             if f not in self.current_image_files:
                 self.current_image_files.append(f)
-        params = {'input_paths': selected}
-        self.run_file_operation(params)
+            if ext in ('.npy', '.pkl', '.pickle'):
+                if f not in self.current_numpy_files:
+                    self.current_numpy_files.append(f)
+                name = os.path.basename(f)
+                self.file_status[name] = '已加载'
+                self.file_visibility.setdefault(name, True)
+            else:
+                tif_paths.append(f)
+
+        if tif_paths:
+            params = {'input_paths': tif_paths}
+            self.run_file_operation(params)
+        else:
+            self._update_file_list()
+            self._refresh_display()
         dialog.accept()
 
     def show_open_vector_dialog(self):
@@ -272,8 +472,17 @@ class MainWindow(QMainWindow):
         selected = [os.path.join(directory, item.text()) for item in widget.selectedItems()]
         if not selected:
             return
-        params = {'input_paths': selected}
-        self.run_vector_processing(params)
+
+        for path in selected:
+            if path not in self.current_vector_files:
+                self.current_vector_files.append(path)
+            name = os.path.basename(path)
+            self.file_status[name] = '已加载'
+            self.file_visibility.setdefault(name, False)
+
+        self._update_file_list()
+        self._refresh_display()
+
         dialog.accept()
 
     def _populate_vector_list(self, widget: QListWidget, directory: str):
@@ -286,68 +495,104 @@ class MainWindow(QMainWindow):
         widget.addItems(files)
 
     def show_save_image_dialog(self):
-        path = os.path.join(self.ui_dir, 'File', 'save_image_as.ui')
-        dialog = QDialog(self)
-        uic.loadUi(path, dialog)
-        if hasattr(dialog, 'pushButton'):
-            dialog.pushButton.clicked.connect(lambda: self._save_image(dialog))
-        if hasattr(dialog, 'pushButton_2'):
-            dialog.pushButton_2.clicked.connect(dialog.reject)
-        dialog.exec()
-
-    def _save_image(self, dialog: QDialog):
-        directory = QFileDialog.getExistingDirectory(self, '选择保存目录')
-        if not directory:
+        items = self.sideList.selectedItems()
+        if not items:
+            self.statusBar().showMessage('请先在左侧选择要保存的文件', 5000)
             return
-        if hasattr(dialog, 'lineEdit'):
-            dialog.lineEdit.setText(directory)
-        params = {'save_dir': directory}
-        self.run_file_save(params)
-        dialog.accept()
+        name = items[0].text().split(' - ')[0]
+        src_path = next(
+            (p for p in self.current_image_files if os.path.basename(p) == name),
+            '',
+        )
+        if not src_path or not os.path.exists(src_path):
+            self.statusBar().showMessage('源文件不存在', 5000)
+            return
+        dest, _ = QFileDialog.getSaveFileName(
+            self,
+            '保存文件为',
+            name,
+            'TIFF Files (*.tif *.tiff);;NumPy Files (*.npy);;Pickle Files (*.pkl *.pickle);;All Files (*)',
+        )
+        if not dest:
+            return
+        try:
+            shutil.copy2(src_path, dest)
+            self.statusBar().showMessage(f'已保存到 {dest}', 5000)
+            self.file_status[name] = '已保存'
+            self._update_file_list()
+        except Exception as e:
+            self.statusBar().showMessage(f'保存失败: {e}', 5000)
+
 
     def show_save_vector_dialog(self):
-        path = os.path.join(self.ui_dir, 'File', 'save_vector_as.ui')
-        dialog = QDialog(self)
-        uic.loadUi(path, dialog)
-        if hasattr(dialog, 'pushButton'):
-            dialog.pushButton.clicked.connect(lambda: self._save_vector(dialog))
-        if hasattr(dialog, 'pushButton_2'):
-            dialog.pushButton_2.clicked.connect(dialog.reject)
-        dialog.exec()
-
-    def _save_vector(self, dialog: QDialog):
-        directory = QFileDialog.getExistingDirectory(self, '选择保存目录')
-        if not directory:
+        items = self.sideList.selectedItems()
+        if not items:
+            self.statusBar().showMessage('请先在左侧选择要保存的矢量文件', 5000)
             return
-        if hasattr(dialog, 'lineEdit'):
-            dialog.lineEdit.setText(directory)
-        params = {'output_dir': directory}
-        self.run_vector_processing(params)
-        dialog.accept()
+        name = items[0].text().split(' - ')[0]
+        src_path = next((p for p in self.current_vector_files if os.path.basename(p) == name), '')
+        if not src_path or not os.path.exists(src_path):
+            self.statusBar().showMessage('源文件不存在', 5000)
+            return
+        dest, _ = QFileDialog.getSaveFileName(
+            self,
+            '保存矢量文件为',
+            name,
+            'Shapefile (*.shp);;GeoJSON (*.geojson);;All Files (*)',
+        )
+        if not dest:
+            return
+        try:
+            base_src, ext_src = os.path.splitext(src_path)
+            base_dest, ext_dest = os.path.splitext(dest)
+            if ext_src == '.shp':
+                for suf in ('.shp', '.shx', '.dbf', '.cpg', '.prj'):
+                    sp = base_src + suf
+                    if os.path.exists(sp):
+                        dp = base_dest + suf
+                        shutil.copy2(sp, dp)
+            else:
+                shutil.copy2(src_path, dest)
+            self.statusBar().showMessage(f'已保存到 {dest}', 5000)
+            self.file_status[name] = '已保存'
+            self._update_file_list()
+        except Exception as e:
+            self.statusBar().showMessage(f'保存失败: {e}', 5000)
+
+
 
     # ------ Vector & ROI 操作 ------
     def show_create_roi_dialog(self):
-        dlg = QDialog(self)
-        dlg.setWindowTitle('Create ROI')
-        layout = QVBoxLayout(dlg)
-        edit = QLineEdit(dlg)
-        edit.setPlaceholderText('x1,y1; x2,y2; x3,y3')
-        btn = QPushButton('Create', dlg)
-        layout.addWidget(edit)
-        layout.addWidget(btn)
+        if not self.current_image_files:
+            self.statusBar().showMessage('请先加载影像文件', 5000)
+            return
+        self.statusBar().showMessage('左键绘制 ROI，右键结束', 0)
+        self.imageLabel.start_roi_drawing(self._on_roi_drawn)
 
-        def act():
-            try:
-                pts = [tuple(map(float, p.split(','))) for p in edit.text().split(';') if p.strip()]
-                from src.processing.vector_processing.roi_creator import create_roi_polygon
-                self.current_roi = create_roi_polygon(pts)
-                self.statusBar().showMessage('ROI 已创建', 5000)
-                dlg.accept()
-            except Exception as e:
-                self.statusBar().showMessage(f'创建失败: {e}', 5000)
-
-        btn.clicked.connect(act)
-        dlg.exec()
+    def _on_roi_drawn(self, poly: Polygon | None):
+        """ROI 绘制完成后的回调"""
+        self.statusBar().clearMessage()
+        if poly is None:
+            self.statusBar().showMessage('ROI 绘制取消或点数不足', 5000)
+            return
+        self.current_roi = poly
+        try:
+            import tempfile
+            from src.processing.vector_processing.roi_saver import save_roi_to_file
+            out_dir = self.task_manager.config.vector_processing_params['output_dir']
+            os.makedirs(out_dir, exist_ok=True)
+            tmp_path = tempfile.mktemp(prefix='roi_', suffix='.shp', dir=out_dir)
+            save_roi_to_file(self.current_roi, tmp_path)
+            self.temp_files.append(tmp_path)
+            self.current_vector_files.append(tmp_path)
+            self.current_roi_path = tmp_path
+            name = os.path.basename(tmp_path)
+            self.file_status[name] = '临时'
+            self.file_visibility[name] = False
+            self._update_file_list()
+            self.statusBar().showMessage('ROI 已创建', 5000)
+        except Exception as e:
+            self.statusBar().showMessage(f'创建失败: {e}', 5000)
 
     def show_edit_roi_dialog(self):
         if self.current_roi is None:
@@ -367,6 +612,10 @@ class MainWindow(QMainWindow):
                 pts = [tuple(map(float, p.split(','))) for p in edit.text().split(';') if p.strip()]
                 from src.processing.vector_processing.roi_editor import edit_roi_polygon
                 self.current_roi = edit_roi_polygon(self.current_roi, pts)
+                from src.processing.vector_processing.roi_saver import save_roi_to_file
+                if self.current_roi_path:
+                    save_roi_to_file(self.current_roi, self.current_roi_path)
+                    self._update_file_list()
                 self.statusBar().showMessage('ROI 已更新', 5000)
                 dlg.accept()
             except Exception as e:
@@ -385,6 +634,12 @@ class MainWindow(QMainWindow):
         try:
             from src.processing.vector_processing.roi_saver import save_roi_to_file
             save_roi_to_file(self.current_roi, path)
+            name = os.path.basename(path)
+            if path not in self.current_vector_files:
+                self.current_vector_files.append(path)
+            self.file_status[name] = '已保存'
+            self.file_visibility[name] = False
+            self._update_file_list()
             self.statusBar().showMessage(f'ROI 已保存到 {path}', 5000)
         except Exception as e:
             self.statusBar().showMessage(f'保存失败: {e}', 5000)
@@ -483,7 +738,58 @@ class MainWindow(QMainWindow):
             bands = [int(b) for b in text.replace(' ', '').split(',') if b]
         if not bands:
             bands = [1]
-        self._preview_bands(bands)
+        
+        if not self.current_image_files:
+            self.statusBar().showMessage('请先加载影像文件', 5000)
+            dialog.reject()
+            return
+
+        img_path = self.current_image_files[0]
+        try:
+            from src.processing.image_display.band_extraction import extract_band
+            arr = extract_band(img_path, bands)
+        except Exception as e:
+            self.statusBar().showMessage(f'波段提取失败: {e}', 5000)
+            dialog.reject()
+            return
+
+        import tempfile
+        import rasterio
+        import numpy as np
+        import os
+
+        out_dir = self.task_manager.config.file_operation_params['output_dir']
+        os.makedirs(out_dir, exist_ok=True)
+        prefix = f"band_{'_'.join(str(b) for b in bands)}_"
+        tmp_tif = tempfile.mktemp(prefix=prefix, suffix='.tif', dir=out_dir)
+
+        with rasterio.open(img_path) as src:
+            meta = src.meta.copy()
+            count = arr.shape[2] if arr.ndim == 3 else 1
+            meta.update(count=count, dtype=arr.dtype)
+            with rasterio.open(tmp_tif, 'w', **meta) as dst:
+                if arr.ndim == 2:
+                    dst.write(arr, 1)
+                else:
+                    dst.write(arr.transpose(2, 0, 1))
+
+        npy_path = os.path.splitext(tmp_tif)[0] + '.npy'
+        save_arr = arr if arr.ndim == 3 else arr[np.newaxis, ...]
+        np.save(npy_path, save_arr)
+
+        self.temp_files.extend([tmp_tif, npy_path])
+
+        self.current_image_files.append(tmp_tif)
+        self.current_numpy_files.append(npy_path)
+        name = os.path.basename(tmp_tif)
+        self.file_status[name] = '临时'
+        self.file_visibility[name] = True
+        self._update_file_list()
+
+        pix = self._load_raster_pixmap(tmp_tif)
+        if pix:
+            self._update_image_label(pix)
+
         dialog.accept()
 
     def show_band_synthesis_dialog(self):
@@ -508,7 +814,52 @@ class MainWindow(QMainWindow):
         except Exception:
             dialog.reject()
             return
-        self._preview_bands([b1, b2, b3])
+        
+        if not self.current_image_files:
+            self.statusBar().showMessage('请先加载影像文件', 5000)
+            dialog.reject()
+            return
+
+        img_path = self.current_image_files[0]
+        try:
+            from src.processing.image_display.band_synthesis import synthesize_band
+            img = synthesize_band(img_path, (b1, b2, b3))
+        except Exception as e:
+            self.statusBar().showMessage(f'波段合成失败: {e}', 5000)
+            dialog.reject()
+            return
+
+        import tempfile
+        import rasterio
+        import numpy as np
+        import os
+
+        out_dir = self.task_manager.config.file_operation_params['output_dir']
+        os.makedirs(out_dir, exist_ok=True)
+        prefix = f"syn_{b1}{b2}{b3}_"
+        tmp_tif = tempfile.mktemp(prefix=prefix, suffix='.tif', dir=out_dir)
+
+        with rasterio.open(img_path) as src:
+            meta = src.meta.copy()
+            meta.update(count=3, dtype=img.dtype)
+            with rasterio.open(tmp_tif, 'w', **meta) as dst:
+                dst.write(img.transpose(2, 0, 1))
+
+        npy_path = os.path.splitext(tmp_tif)[0] + '.npy'
+        np.save(npy_path, img.transpose(2, 0, 1))
+
+        self.temp_files.extend([tmp_tif, npy_path])
+
+        self.current_image_files.append(tmp_tif)
+        self.current_numpy_files.append(npy_path)
+        name = os.path.basename(tmp_tif)
+        self.file_status[name] = '临时'
+        self.file_visibility[name] = True
+        self._update_file_list()
+
+        pix = self._load_raster_pixmap(tmp_tif)
+        if pix:
+            self._update_image_label(pix)
         dialog.accept()
 
     def show_histogram_dialog(self):
@@ -517,17 +868,30 @@ class MainWindow(QMainWindow):
         uic.loadUi(path, dialog)
         if hasattr(dialog, 'pushButton'):
             dialog.pushButton.clicked.connect(dialog.accept)
-        paths = self.current_image_files
-        if paths:
+        img_path = self._selected_image_path()
+        if img_path:
             try:
                 from src.processing.image_display.histogram import band_histogram
-                h = band_histogram(paths[0], 1)
+                h = band_histogram(img_path, 1)
                 counts = list(h.values())[0]
                 import matplotlib.pyplot as plt
                 from io import BytesIO
                 fig = plt.figure(figsize=(4, 3))
                 plt.bar(range(len(counts)), counts)
                 buf = BytesIO()
+                import tempfile
+                out_dir = self.task_manager.config.file_operation_params['output_dir']
+                os.makedirs(out_dir, exist_ok=True)
+                tmp_png = tempfile.mktemp(prefix='hist_', suffix='.png', dir=out_dir)
+                fig.savefig(tmp_png)
+                self.temp_files.append(tmp_png)
+                self.current_image_files.append(tmp_png)
+                self.current_numpy_files.append('')
+                name = os.path.basename(tmp_png)
+                self.file_status[name] = '临时'
+                self.file_visibility[name] = True
+                self._update_file_list()
+
                 fig.savefig(buf, format='png')
                 plt.close(fig)
                 buf.seek(0)
@@ -536,21 +900,24 @@ class MainWindow(QMainWindow):
                 scene = QGraphicsScene(dialog.graphicsView)
                 scene.addPixmap(pix)
                 dialog.graphicsView.setScene(scene)
+                self.display_image(tmp_png)
             except Exception as e:
                 self.statusBar().showMessage(f'直方图绘制失败: {e}', 5000)
         else:
-            self.statusBar().showMessage('请先加载影像文件', 5000)
+            QMessageBox.information(self, '提示', '请选择文件')
         dialog.exec()
 
     def show_projection_dialog(self):
         path = os.path.join(self.ui_dir, 'ImageDisplay', 'Projection.ui')
         dialog = QDialog(self)
         uic.loadUi(path, dialog)
-        file_path = self.current_image_files[0] if self.current_image_files else ''
-        if hasattr(dialog, 'lineEdit'):
+        file_path = self._selected_image_path()
+        if file_path and hasattr(dialog, 'lineEdit'):
             dialog.lineEdit.setText(file_path)
         if not file_path:
-            self.statusBar().showMessage('请先加载影像文件', 5000)
+            QMessageBox.information(self, '提示', '请选择文件')
+            dialog.reject()
+            return
         if hasattr(dialog, 'pushButton'):
             dialog.pushButton.clicked.connect(lambda: self._run_projection(dialog))
         dialog.exec()
@@ -558,10 +925,12 @@ class MainWindow(QMainWindow):
     def _run_projection(self, dialog: QDialog):
         input_path = dialog.lineEdit.text().strip() if hasattr(dialog, 'lineEdit') else ''
         if not input_path:
+            QMessageBox.information(self, '提示', '请选择文件')
             return
-        save_path, _ = QFileDialog.getSaveFileName(self, '保存为', os.path.splitext(input_path)[0] + '_proj.tif', 'TIFF Files (*.tif *.tiff)')
-        if not save_path:
-            return
+        import tempfile, os
+        out_dir = self.task_manager.config.file_operation_params['output_dir']
+        os.makedirs(out_dir, exist_ok=True)
+        save_path = tempfile.mktemp(prefix='proj_', suffix='.tif', dir=out_dir)
         try:
             from osgeo import osr
             from src.processing.image_display.projection import reproject_image
@@ -569,14 +938,30 @@ class MainWindow(QMainWindow):
             srs.ImportFromEPSG(4326)
             wkt = srs.ExportToWkt()
             reproject_image(input_path, save_path, wkt)
-            self.statusBar().showMessage(f'保存到 {save_path}', 5000)
+            import rasterio, numpy as np
+            with rasterio.open(save_path) as src:
+                arr = src.read()
+            npy_path = os.path.splitext(save_path)[0] + '.npy'
+            np.save(npy_path, arr)
+            self.temp_files.extend([save_path, npy_path])
+            self.current_image_files.append(save_path)
+            self.current_numpy_files.append(npy_path)
+            name = os.path.basename(save_path)
+            self.file_status[name] = '临时'
+            self.file_visibility[name] = True
+            self._update_file_list()
+            pix = self._load_raster_pixmap(save_path)
+            if pix:
+                self._update_image_label(pix)
+            self.statusBar().showMessage(f'已保存到 {save_path}', 5000)
         except Exception as e:
             self.statusBar().showMessage(f'投影转换失败: {e}', 5000)
         dialog.accept()
 
     def show_cut_dialog(self):
-        if not self.current_image_files:
-            self.statusBar().showMessage('请先加载影像文件', 5000)
+        img_path = self._selected_image_path()
+        if not img_path:
+            QMessageBox.information(self, '提示', '请选择文件')
             return
         dlg = QDialog(self)
         dlg.setWindowTitle('Image Cutting')
@@ -589,30 +974,49 @@ class MainWindow(QMainWindow):
             edits.append(sub)
         btn = QPushButton('Cut', dlg)
         layout.addWidget(btn)
-        btn.clicked.connect(lambda: self._run_cut(dlg, edits))
+        btn.clicked.connect(lambda: self._run_cut(dlg, edits, img_path))
         dlg.exec()
 
-    def _run_cut(self, dlg: QDialog, edits: list):
+    def _run_cut(self, dlg: QDialog, edits: list, path: str):
         try:
             vals = [int(e.text()) for e in edits]
         except ValueError:
             self.statusBar().showMessage('请输入整数参数', 5000)
             return
         from src.processing.image_display.image_cutting import cut_image
-        arr = cut_image(self.current_image_files[0], *vals)
-        out_path = os.path.join(self.task_manager.config.image_display_params['output_dir'], 'cut_preview.png')
-        from PIL import Image
-        if arr.ndim == 3:
-            img = Image.fromarray(arr)
-        else:
-            img = Image.fromarray(arr)
-        img.save(out_path)
-        self.display_image(out_path)
+        arr = cut_image(path, *vals)
+        import tempfile, rasterio, numpy as np, os
+        out_dir = self.task_manager.config.file_operation_params['output_dir']
+        os.makedirs(out_dir, exist_ok=True)
+        tmp_tif = tempfile.mktemp(prefix='cut_', suffix='.tif', dir=out_dir)
+        with rasterio.open(path) as src:
+            meta = src.meta.copy()
+            count = arr.shape[2] if arr.ndim == 3 else 1
+            meta.update(count=count, dtype=arr.dtype)
+            with rasterio.open(tmp_tif, 'w', **meta) as dst:
+                if arr.ndim == 2:
+                    dst.write(arr, 1)
+                else:
+                    dst.write(arr.transpose(2, 0, 1))
+        npy_path = os.path.splitext(tmp_tif)[0] + '.npy'
+        save_arr = arr if arr.ndim == 3 else arr[np.newaxis, ...]
+        np.save(npy_path, save_arr)
+        self.temp_files.extend([tmp_tif, npy_path])
+        self.current_image_files.append(tmp_tif)
+        self.current_numpy_files.append(npy_path)
+        name = os.path.basename(tmp_tif)
+        self.file_status[name] = '临时'
+        self.file_visibility[name] = True
+        self._update_file_list()
+        pix = self._load_raster_pixmap(tmp_tif)
+        if pix:
+            self._update_image_label(pix)
         dlg.accept()
 
     def show_spectral_dialog(self):
-        if not self.current_image_files:
-            self.statusBar().showMessage('请先加载影像文件', 5000)
+        img_path = self._selected_image_path()
+        if not img_path:
+            QMessageBox.information(self, '提示', '请选择文件')
             return
         dlg = QDialog(self)
         dlg.setWindowTitle('Spectral Analysis')
@@ -627,10 +1031,10 @@ class MainWindow(QMainWindow):
         layout.addWidget(btn)
         result_label = QLabel(dlg)
         layout.addWidget(result_label)
-        btn.clicked.connect(lambda: self._run_spectral(row_edit, col_edit, result_label))
+        btn.clicked.connect(lambda: self._run_spectral(row_edit, col_edit, result_label, img_path))
         dlg.exec()
 
-    def _run_spectral(self, row_edit: QLineEdit, col_edit: QLineEdit, label: QLabel):
+    def _run_spectral(self, row_edit: QLineEdit, col_edit: QLineEdit, label: QLabel, path: str):
         try:
             row = int(row_edit.text())
             col = int(col_edit.text())
@@ -638,9 +1042,23 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage('请输入有效的行列号', 5000)
             return
         from src.processing.image_display.spectral_analysis import pixel_spectrum
-        spec = pixel_spectrum(self.current_image_files[0], row, col)
+        spec = pixel_spectrum(path, row, col)
         text = ', '.join(f'{k}:{v}' for k, v in spec.items())
         label.setText(text)
+        import tempfile, os
+        out_dir = self.task_manager.config.file_operation_params['output_dir']
+        os.makedirs(out_dir, exist_ok=True)
+        tmp_txt = tempfile.mktemp(prefix='spectral_', suffix='.txt', dir=out_dir)
+        with open(tmp_txt, 'w', encoding='utf-8') as f:
+            for k, v in spec.items():
+                f.write(f'{k}: {v}\n')
+        self.temp_files.append(tmp_txt)
+        self.current_image_files.append(tmp_txt)
+        self.current_numpy_files.append('')
+        name = os.path.basename(tmp_txt)
+        self.file_status[name] = '临时'
+        self.file_visibility[name] = False
+        self._update_file_list()
 
     def show_metadata_dialog(self):
         path = os.path.join(self.ui_dir, 'ImageDisplay', 'Viewing_metadata.ui')
@@ -718,6 +1136,10 @@ class MainWindow(QMainWindow):
         self.run_image_processing(params)
 
     def show_stretch_dialog(self):
+        img_path = self._selected_image_path()
+        if not img_path:
+            QMessageBox.information(self, '提示', '请选择文件')
+            return
         dlg = QDialog(self)
         dlg.setWindowTitle('Image Stretching')
         lay = QVBoxLayout(dlg)
@@ -730,27 +1152,100 @@ class MainWindow(QMainWindow):
         btn = QPushButton('Confirm', dlg)
         for w in (QLabel('Low %', dlg), low, QLabel('High %', dlg), high, btn):
             lay.addWidget(w)
-        btn.clicked.connect(lambda: (self._run_processing(['stretch'], {'stretch': {'in_range': (low.value(), high.value())}}), dlg.accept()))
+        btn.clicked.connect(lambda: self._run_stretch(img_path, low.value(), high.value(), dlg))
         dlg.exec()
 
     def show_equalize_dialog(self):
+        img_path = self._selected_image_path()
+        if not img_path:
+            QMessageBox.information(self, '提示', '请选择文件')
+            return
         dlg = QDialog(self)
         dlg.setWindowTitle('Histogram Equalization')
         lay = QVBoxLayout(dlg)
         btn = QPushButton('Run', dlg)
         lay.addWidget(btn)
-        btn.clicked.connect(lambda: (self._run_processing(['equalization']), dlg.accept()))
+        btn.clicked.connect(lambda: self._run_equalize(img_path, dlg))
         dlg.exec()
 
+    def _run_stretch(self, path: str, low: int, high: int, dlg: QDialog):
+        try:
+            import numpy as np, rasterio, tempfile, os
+            ext = os.path.splitext(path)[1].lower()
+            if ext == '.npy':
+                arr = np.load(path)
+            elif ext in ('.pkl', '.pickle'):
+                arr = _load_array_from_pkl(path)
+            else:
+                with rasterio.open(path) as src:
+                    arr = src.read()
+            from src.processing.image_processing.enhancement.image_stretching import stretch_percent
+            result = stretch_percent(arr, low, high)
+            out_dir = self.task_manager.config.file_operation_params['output_dir']
+            os.makedirs(out_dir, exist_ok=True)
+            tmp = tempfile.mktemp(prefix='stretch_', suffix='.npy', dir=out_dir)
+            np.save(tmp, result)
+            self.temp_files.append(tmp)
+            self.current_image_files.append(tmp)
+            self.current_numpy_files.append(tmp)
+            name = os.path.basename(tmp)
+            self.file_status[name] = '临时'
+            self.file_visibility[name] = True
+            self._update_file_list()
+            pix = self._load_raster_pixmap(tmp)
+            if pix:
+                self._update_image_label(pix)
+            self.statusBar().showMessage(f'已保存到 {tmp}', 5000)
+        except Exception as e:
+            self.statusBar().showMessage(f'拉伸失败: {e}', 5000)
+        dlg.accept()
+
+    def _run_equalize(self, path: str, dlg: QDialog):
+        try:
+            import numpy as np, rasterio, tempfile, os
+            ext = os.path.splitext(path)[1].lower()
+            if ext == '.npy':
+                arr = np.load(path)
+            elif ext in ('.pkl', '.pickle'):
+                arr = _load_array_from_pkl(path)
+            else:
+                with rasterio.open(path) as src:
+                    arr = src.read()
+            from src.processing.image_processing.enhancement.equalization import hist_equalize
+            result = hist_equalize(arr)
+            out_dir = self.task_manager.config.file_operation_params['output_dir']
+            os.makedirs(out_dir, exist_ok=True)
+            tmp = tempfile.mktemp(prefix='equalize_', suffix='.npy', dir=out_dir)
+            np.save(tmp, result)
+            self.temp_files.append(tmp)
+            self.current_image_files.append(tmp)
+            self.current_numpy_files.append(tmp)
+            name = os.path.basename(tmp)
+            self.file_status[name] = '临时'
+            self.file_visibility[name] = True
+            self._update_file_list()
+            pix = self._load_raster_pixmap(tmp)
+            if pix:
+                self._update_image_label(pix)
+            self.statusBar().showMessage(f'已保存到 {tmp}', 5000)
+        except Exception as e:
+            self.statusBar().showMessage(f'均衡化失败: {e}', 5000)
+        dlg.accept()
+
+
     def show_smoothing_dialog(self):
+        img_path = self._selected_image_path()
+        if not img_path:
+            QMessageBox.information(self, '提示', '请选择文件')
+            return
         path = os.path.join(self.ui_dir, 'ImageProcessing', 'Smoothing.ui')
         dlg = QDialog(self)
         uic.loadUi(path, dlg)
         if hasattr(dlg, 'pushButton'):
-            dlg.pushButton.clicked.connect(lambda: self._run_smoothing(dlg))
+            dlg.pushButton.clicked.connect(lambda: self._run_smoothing(dlg, img_path))
         dlg.exec()
 
-    def _run_smoothing(self, dlg: QDialog):
+    def _run_smoothing(self, dlg: QDialog, path: str):
         if getattr(dlg, 'radioButton', None) and dlg.radioButton.isChecked():
             method = 'smooth_mean'
         elif getattr(dlg, 'radioButton_2', None) and dlg.radioButton_2.isChecked():
@@ -762,45 +1257,71 @@ class MainWindow(QMainWindow):
         v1 = s1.value() if s1 else 3
         v2 = s2.value() if s2 else v1
         size = (v1, v2) if v1 != v2 else v1
-        if method == 'smooth_gaussian':
-            opts = {method: {'sigma': size}}
-        else:
-            opts = {method: {'size': size}}
-        self._run_processing([method], opts)
+        try:
+            arr = self._load_image_array(path)
+            from src.processing.image_processing.filtering import smoothing as sm
+            if method == 'smooth_gaussian':
+                result = sm.smooth_gaussian(arr, sigma=size)
+            elif method == 'smooth_mean':
+                result = sm.smooth_mean(arr, size=size)
+            else:
+                result = sm.smooth_median(arr, size=size)
+            self._save_temp_array(result, f'{method}_')
+        except Exception as e:
+            self.statusBar().showMessage(f'平滑失败: {e}', 5000)
         dlg.accept()
 
     def show_sharpening_dialog(self):
+        img_path = self._selected_image_path()
+        if not img_path:
+            QMessageBox.information(self, '提示', '请选择文件')
+            return
         path = os.path.join(self.ui_dir, 'ImageProcessing', 'Sharpening.ui')
         dlg = QDialog(self)
         uic.loadUi(path, dlg)
         if hasattr(dlg, 'pushButton'):
-            dlg.pushButton.clicked.connect(lambda: self._run_sharpening(dlg))
+            dlg.pushButton.clicked.connect(lambda: self._run_sharpening(dlg, img_path))
         dlg.exec()
 
-    def _run_sharpening(self, dlg: QDialog):
+    def _run_sharpening(self, dlg: QDialog, path: str):
         if getattr(dlg, 'radioButton', None) and dlg.radioButton.isChecked():
             method = 'sharpen_unsharp'
         else:
             method = 'sharpen_laplacian'
         radius = getattr(dlg, 'spinBox', None)
         amount = getattr(dlg, 'spinBox_2', None)
-        opts = {}
-        if method == 'sharpen_unsharp':
-            opts = {method: {'radius': radius.value() if radius else 1.0, 'amount': amount.value() if amount else 1.0}}
-        else:
-            opts = {method: {'alpha': radius.value() if radius else 1.0}}
-        self._run_processing([method], opts)
+        try:
+            arr = self._load_image_array(path)
+            from src.processing.image_processing.filtering import sharpening as sp
+            if method == 'sharpen_unsharp':
+                result = sp.sharpen_unsharp(
+                    arr,
+                    radius=radius.value() if radius else 1.0,
+                    amount=amount.value() if amount else 1.0,
+                )
+            else:
+                result = sp.sharpen_laplacian(
+                    arr,
+                    alpha=radius.value() if radius else 1.0,
+                )
+            self._save_temp_array(result, f'{method}_')
+        except Exception as e:
+            self.statusBar().showMessage(f'锐化失败: {e}', 5000)
         dlg.accept()
 
     def show_edge_dialog(self):
+        img_path = self._selected_image_path()
+        if not img_path:
+            QMessageBox.information(self, '提示', '请选择文件')
+            return
         path = os.path.join(self.ui_dir, 'ImageProcessing', 'Edge_detection.ui')
         dlg = QDialog(self)
         uic.loadUi(path, dlg)
         if hasattr(dlg, 'pushButton'):
-            dlg.pushButton.clicked.connect(lambda: self._run_edge(dlg))
+            dlg.pushButton.clicked.connect(lambda: self._run_edge(dlg, img_path))
         dlg.exec()
 
-    def _run_edge(self, dlg: QDialog):
+    def _run_edge(self, dlg: QDialog, path: str):
         if getattr(dlg, 'radioButton', None) and dlg.radioButton.isChecked():
             method = 'edge_sobel'
         elif getattr(dlg, 'radioButton_3', None) and dlg.radioButton_3.isChecked():
@@ -812,11 +1333,36 @@ class MainWindow(QMainWindow):
         val1 = s1.value() if s1 else 1
         val2 = s2.value() if s2 else val1
         sigma = (val1, val2) if val1 != val2 else float(val1)
-        opts = {method: {'sigma': sigma}} if method == 'edge_canny' else {}
-        self._run_processing([method], opts)
+        try:
+            arr = self._load_image_array(path)
+            from src.processing.image_processing.filtering import edge_detection as ed
+            if method == 'edge_sobel':
+                result = ed.edge_sobel(arr)
+            elif method == 'edge_roberts':
+                result = ed.edge_roberts(arr)
+            else:
+                result = ed.edge_canny(arr, sigma=sigma)
+            self._save_temp_array(result, f'{method}_')
+        except Exception as e:
+            self.statusBar().showMessage(f'边缘检测失败: {e}', 5000)
         dlg.accept()
 
     def show_band_math_dialog(self):
+        items = self.sideList.selectedItems()
+        if not items:
+            QMessageBox.information(self, '提示', '请选择文件')
+            return
+        paths: list[str] = []
+        for it in items:
+            name = it.text().split(" - ")[0]
+            for p in self.current_image_files:
+                if os.path.basename(p) == name:
+                    paths.append(p)
+                    break
+        if not paths:
+            QMessageBox.information(self, '提示', '请选择文件')
+            return
+        img_path = paths[0]
         path = os.path.join(self.ui_dir, 'ImageProcessing', 'Band_math.ui')
         dlg = QDialog(self)
         uic.loadUi(path, dlg)
@@ -862,12 +1408,12 @@ class MainWindow(QMainWindow):
                 lambda: model.appendRow(QStandardItem(dlg.lineEdit.text().strip())) if dlg.lineEdit.text().strip() else None
             )
         if hasattr(dlg, 'pushButton_6'):
-            dlg.pushButton_6.clicked.connect(lambda: self._run_band_math(dlg, model))
+            dlg.pushButton_6.clicked.connect(lambda: self._run_band_math(dlg, model, paths))
         if hasattr(dlg, 'pushButton_7'):
             dlg.pushButton_7.clicked.connect(dlg.reject)
         dlg.exec()
 
-    def _run_band_math(self, dlg: QDialog, model: QStandardItemModel):
+    def _run_band_math(self, dlg: QDialog, model: QStandardItemModel, paths: list[str]):
         expr = dlg.lineEdit.text().strip() if hasattr(dlg, 'lineEdit') else ''
         if not expr and model.rowCount() > 0:
             idx = dlg.listView.currentIndex()
@@ -876,8 +1422,36 @@ class MainWindow(QMainWindow):
         if not expr:
             self.statusBar().showMessage('请输入表达式', 5000)
             return
-        opts = {'band_math': {'expr': expr}}
-        self._run_processing(['band_math'], opts)
+        import re
+        vars_found = sorted({int(x) for x in re.findall(r'B(\d+)', expr)})
+        if not vars_found:
+            self.statusBar().showMessage('表达式中未找到波段变量', 5000)
+            return
+
+        mapping = self._select_band_sources([f'B{i}' for i in vars_found], paths)
+        if mapping is None:
+            return
+
+        bands = {}
+        try:
+            for var, (p, b_idx) in mapping.items():
+                arr = self._load_image_array(p)
+                if arr.ndim == 2:
+                    if b_idx != 1:
+                        raise ValueError(f'{os.path.basename(p)} 只有一个波段')
+                    band = arr
+                else:
+                    if b_idx > arr.shape[0]:
+                        raise ValueError(f'{os.path.basename(p)} 没有波段 {b_idx}')
+                    band = arr[b_idx - 1]
+                bands[var] = band
+
+            from src.processing.image_processing.band_math import _safe_eval
+            result = _safe_eval(expr, **bands)
+            self._save_temp_array(result, 'band_math_')
+        except Exception as e:
+            self.statusBar().showMessage(f'波段运算失败: {e}', 5000)
+            return
         dlg.accept()
 
     def show_feature_extraction_dialog(self):
@@ -916,10 +1490,10 @@ class MainWindow(QMainWindow):
         dlg.setWindowTitle('Classification')
         layout = QVBoxLayout(dlg)
         feat_edit = QLineEdit(dlg)
-        feat_edit.setPlaceholderText('features.npy')
+        feat_edit.setPlaceholderText('features.npy / features.pkl')
         feat_btn = QPushButton('Browse Features', dlg)
         lbl_edit = QLineEdit(dlg)
-        lbl_edit.setPlaceholderText('labels.npy (optional)')
+        lbl_edit.setPlaceholderText('labels.npy / labels.pkl (optional)')
         lbl_btn = QPushButton('Browse Labels', dlg)
         model_box = QComboBox(dlg)
         model_box.addItems(['decision_tree','random_forest','svm','maximum_likelihood','minimum_distance','kmeans','isodata'])
@@ -930,8 +1504,8 @@ class MainWindow(QMainWindow):
         for w in (feat_edit, feat_btn, lbl_edit, lbl_btn, model_box, run_btn):
             layout.addWidget(w)
 
-        feat_btn.clicked.connect(lambda: feat_edit.setText(QFileDialog.getOpenFileName(self, '选择 features', '', 'NumPy Files (*.npy)')[0]))
-        lbl_btn.clicked.connect(lambda: lbl_edit.setText(QFileDialog.getOpenFileName(self, '选择 labels', '', 'NumPy Files (*.npy)')[0]))
+        feat_btn.clicked.connect(lambda: feat_edit.setText(QFileDialog.getOpenFileName(self, '选择 features', '', 'Feature Files (*.npy *.pkl *.pickle)')[0]))
+        lbl_btn.clicked.connect(lambda: lbl_edit.setText(QFileDialog.getOpenFileName(self, '选择 labels', '', 'Label Files (*.npy *.pkl *.pickle)')[0]))
 
         def act():
             feats = feat_edit.text().strip()
@@ -942,22 +1516,70 @@ class MainWindow(QMainWindow):
             if lbl_edit.text().strip():
                 data['labels'] = lbl_edit.text().strip()
             pipeline = {'classifiers': [{'name': model_box.currentText(), 'params': {}}], 'compare': False}
-            params = {'data': data, 'pipeline_config': pipeline, 'model': model_box.currentText()}
+            import tempfile, os
+            out_dir = self.task_manager.config.file_operation_params['output_dir']
+            os.makedirs(out_dir, exist_ok=True)
+            tmp = tempfile.mktemp(prefix='class_', suffix='.npy', dir=out_dir)
+            params = {
+                'data': data,
+                'pipeline_config': pipeline,
+                'model': model_box.currentText(),
+                'class_map_path': tmp,
+            }
+            self.temp_files.append(tmp)
             self.run_classification(params)
             dlg.accept()
 
         run_btn.clicked.connect(act)
         dlg.exec()
 
+    def show_deep_learning_classification_dialog(self):
+        self.show_ui_dialog(os.path.join('Classification', 'Deep_Learning_Classification_dialog.ui'))
+
+    def show_save_model_as_dialog(self):
+        self.show_ui_dialog(os.path.join('Classification', 'Save_Model_As_dialog.ui'))
+
+    def show_custom_color_dialog(self):
+        self.show_ui_dialog(os.path.join('Classification', 'ClassificationResultProcessing', 'Custom_color_dialog.ui'))
+
+    def show_smooth_processing_dialog(self):
+        self.show_ui_dialog(os.path.join('Classification', 'ClassificationResultProcessing', 'Smooth_Processing_dialog.ui'))
+
+    def show_denoising_dialog(self):
+        self.show_ui_dialog(os.path.join('Classification', 'ClassificationResultProcessing', 'Denoising_dialog.ui'))
+
+    def show_generate_report_dialog(self):
+        self.show_ui_dialog(os.path.join('Classification', 'Generating_Classification_Report_dialog.ui'))
+
     def _get_band_count(self) -> int:
         if self.current_image_files:
-            try:
-                from osgeo import gdal
-                ds = gdal.Open(self.current_image_files[0])
-                if ds:
-                    return ds.RasterCount
-            except Exception:
-                pass
+           path = self._selected_image_path() or self.current_image_files[0]
+           ext = os.path.splitext(path)[1].lower()
+           if ext in ('.npy', '.pkl', '.pickle'):
+                try:
+                    import numpy as np
+                    if ext == '.npy':
+                        arr = np.load(path)
+                    else:
+                        arr = _load_array_from_pkl(path)
+                    return 1 if arr.ndim == 2 else arr.shape[0]
+                except Exception:
+                    pass
+           elif ext in ('.png', '.jpg', '.jpeg'):
+                try:
+                    from PIL import Image
+                    img = Image.open(path)
+                    return 3 if img.mode in ('RGB', 'RGBA') else 1
+                except Exception:
+                    pass
+           else:
+                try:
+                    from osgeo import gdal
+                    ds = gdal.Open(path)
+                    if ds:
+                        return ds.RasterCount
+                except Exception:
+                    pass
         paths = self.task_manager.config.image_display_params.get('paths', [])
         if paths:
             try:
@@ -971,23 +1593,40 @@ class MainWindow(QMainWindow):
     def _update_image_label(self, pixmap: QPixmap) -> None:
         """在右侧标签展示给定的图像"""
         self.current_pixmap = pixmap
-        scaled = pixmap.scaled(
-            self.imageLabel.size() if self.imageLabel.size() != QSize(0, 0) else pixmap.size(),
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        self.imageLabel.setPixmap(scaled)
+        self.imageLabel.setPixmap(pixmap)
 
     def _load_raster_pixmap(self, path: str, bands: list[int] | None = None) -> QPixmap | None:
-        """读取遥感影像并转换为 QPixmap"""
+        """读取遥感影像或数组文件并转换为 QPixmap"""
+        ext = os.path.splitext(path)[1].lower()
         try:
-            with rasterio.open(path) as src:
+            if ext in ('.npy', '.pkl', '.pickle'):
+                import pickle
+            if ext in ('.shp', '.geojson', '.gpkg', '.json'):
+                return self._load_vector_pixmap(path)
+            if ext in ('.png', '.jpg', '.jpeg'):
+                pix = QPixmap(path)
+                return pix if not pix.isNull() else None
+            if ext in ('.npy', '.pkl', '.pickle'):
+                if ext == '.npy':
+                    data = np.load(path)
+                else:
+                    data = _load_array_from_pkl(path)
+                if data.ndim == 2:
+                    data = data[np.newaxis, ...]
                 if bands is None:
-                    bands = [1, 2, 3] if src.count >= 3 else [1]
-                bands = [b for b in bands if 1 <= b <= src.count]
+                     bands = [1, 2, 3] if data.shape[0] >= 3 else [1]
+                bands = [b for b in bands if 1 <= b <= data.shape[0]]
                 if not bands:
                     return None
-                data = src.read(bands)
+                data = data[[b - 1 for b in bands]]
+            else:
+                with rasterio.open(path) as src:
+                    if bands is None:
+                        bands = [1, 2, 3] if src.count >= 3 else [1]
+                    bands = [b for b in bands if 1 <= b <= src.count]
+                    if not bands:
+                        return None
+                    data = src.read(bands)
         except Exception as e:
             self.statusBar().showMessage(f"读取影像失败: {e}", 5000)
             return None
@@ -1000,15 +1639,169 @@ class MainWindow(QMainWindow):
 
         if data.shape[0] == 1:
             img = data[0]
-            qimg = QImage(img.data, img.shape[1], img.shape[0], img.strides[0], QImage.Format.Format_Grayscale8)
+            qimg = QImage(
+                img.tobytes(),
+                img.shape[1],
+                img.shape[0],
+                img.strides[0],
+                QImage.Format.Format_Grayscale8,
+            )
         else:
-            img = np.transpose(data, (1, 2, 0))
-            qimg = QImage(img.data, img.shape[1], img.shape[0], img.strides[0], QImage.Format.Format_RGB888)
-        return QPixmap.fromImage(qimg.copy())
+            img = np.ascontiguousarray(np.transpose(data, (1, 2, 0)))
+            qimg = QImage(
+                img.tobytes(),
+                img.shape[1],
+                img.shape[0],
+                img.strides[0],
+                QImage.Format.Format_RGB888,
+            )
+
+        pixmap = QPixmap.fromImage(qimg.copy())
+        if pixmap.isNull():
+            return None
+        return pixmap
+
+    def _load_vector_pixmap(self, path: str) -> QPixmap | None:
+        """读取矢量文件并转换为 QPixmap"""
+        try:
+            import geopandas as gpd
+            import matplotlib.pyplot as plt
+            from io import BytesIO
+            import warnings
+            from rasterio.errors import NotGeoreferencedWarning
+
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", category=NotGeoreferencedWarning)
+                gdf = gpd.read_file(path)
+
+            fig, ax = plt.subplots(figsize=(4, 4))
+            ax.axis("off")
+            try:
+                # GeoPandas 早期版本在纬度接近 90 度时使用 ``aspect='auto'`` 会
+                # 计算出无穷大的纵横比，导致 ``matplotlib`` 报错。这里改为传入
+                # ``aspect=None``，跳过 GeoPandas 的自动设置，再手动设为 ``auto``。
+                gdf.plot(ax=ax, facecolor="none", edgecolor="red", aspect=None)
+            except Exception as e:
+                plt.close(fig)
+                raise e
+
+            ax.set_aspect("auto")
+
+            buf = BytesIO()
+            fig.savefig(buf, format="png", bbox_inches="tight")
+            plt.close(fig)
+            buf.seek(0)
+            pix = QPixmap()
+            pix.loadFromData(buf.getvalue())
+            return pix if not pix.isNull() else None
+        except Exception as e:
+            self.statusBar().showMessage(f"矢量显示失败: {e}", 5000)
+            return None
+
+    def _load_image_array(self, path: str):
+        """读取影像或数组文件为 ndarray"""
+        import numpy as np, rasterio, os
+        ext = os.path.splitext(path)[1].lower()
+        if ext == '.npy':
+            return np.load(path)
+        if ext in ('.pkl', '.pickle'):
+            return _load_array_from_pkl(path)
+        with rasterio.open(path) as src:
+            return src.read()
+
+    def _save_temp_array(self, arr, prefix: str) -> str:
+        """保存数组为临时 .npy 文件并更新列表"""
+        import numpy as np, tempfile, os
+        out_dir = self.task_manager.config.file_operation_params['output_dir']
+        os.makedirs(out_dir, exist_ok=True)
+        tmp = tempfile.mktemp(prefix=prefix, suffix='.npy', dir=out_dir)
+        np.save(tmp, arr)
+        self.temp_files.append(tmp)
+        self.current_image_files.append(tmp)
+        self.current_numpy_files.append(tmp)
+        name = os.path.basename(tmp)
+        self.file_status[name] = '临时'
+        self.file_visibility[name] = True
+        self._update_file_list()
+        pix = self._load_raster_pixmap(tmp)
+        if pix:
+            self._update_image_label(pix)
+        self.statusBar().showMessage(f'已保存到 {tmp}', 5000)
+        return tmp
+
+    def _get_band_count_for_path(self, path: str) -> int:
+        """返回指定文件的波段数"""
+        ext = os.path.splitext(path)[1].lower()
+        if ext in ('.npy', '.pkl', '.pickle'):
+            try:
+                import numpy as np
+                if ext == '.npy':
+                    arr = np.load(path)
+                else:
+                    arr = _load_array_from_pkl(path)
+                return 1 if arr.ndim == 2 else arr.shape[0]
+            except Exception:
+                return 1
+        if ext in ('.png', '.jpg', '.jpeg'):
+            try:
+                from PIL import Image
+                img = Image.open(path)
+                return 3 if img.mode in ('RGB', 'RGBA') else 1
+            except Exception:
+                return 1
+        try:
+            from osgeo import gdal
+            ds = gdal.Open(path)
+            if ds:
+                return ds.RasterCount
+        except Exception:
+            pass
+        return 1
+
+    def _select_band_sources(self, variables: list[str], paths: list[str]):
+        """弹出对话框让用户选择每个变量对应的文件及波段"""
+        dlg = QDialog(self)
+        dlg.setWindowTitle('选择波段来源')
+        layout = QVBoxLayout(dlg)
+        rows: list[tuple[QComboBox, QSpinBox]] = []
+        names = [os.path.basename(p) for p in paths]
+        for var in variables:
+            row = QHBoxLayout()
+            label = QLabel(var, dlg)
+            combo = QComboBox(dlg)
+            combo.addItems(names)
+            spin = QSpinBox(dlg)
+            spin.setMinimum(1)
+            def update_range(index, sp=spin):
+                cnt = self._get_band_count_for_path(paths[index])
+                sp.setMaximum(max(cnt, 1))
+            combo.currentIndexChanged.connect(update_range)
+            update_range(0)
+            row.addWidget(label)
+            row.addWidget(combo)
+            row.addWidget(spin)
+            layout.addLayout(row)
+            rows.append((combo, spin))
+        btn_row = QHBoxLayout()
+        ok_btn = QPushButton('OK', dlg)
+        cancel_btn = QPushButton('Cancel', dlg)
+        ok_btn.clicked.connect(dlg.accept)
+        cancel_btn.clicked.connect(dlg.reject)
+        btn_row.addWidget(ok_btn)
+        btn_row.addWidget(cancel_btn)
+        layout.addLayout(btn_row)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return None
+        result: dict[str, tuple[str, int]] = {}
+        for var, (combo, spin) in zip(variables, rows):
+            path = paths[combo.currentIndex()]
+            band = spin.value()
+            result[var] = (path, band)
+        return result
 
     def _preview_bands(self, bands: list[int]):
         """根据指定波段在界面预览当前文件"""
-        for path in self.current_image_files:
+        for path in self.current_image_files + self.current_vector_files:
             name = os.path.basename(path)
             if self.file_visibility.get(name, True):
                 pix = self._load_raster_pixmap(path, bands)
@@ -1058,6 +1851,7 @@ class MainWindow(QMainWindow):
 
         self.progressDialog.setLabelText(f"{title}…")
         self.progressDialog.show()
+        QTimer.singleShot(2000, self.progressDialog.hide)
         worker.start()
 
     def _handle_result(self, title: str, result: TaskResult):
@@ -1081,7 +1875,26 @@ class MainWindow(QMainWindow):
             elif title == "分类":
                 for path in self.current_image_files:
                     self.file_status[os.path.basename(path)] = "已分类"
+                for out in result.outputs:
+                    if isinstance(out, str) and out.endswith('.npy'):
+                        if out not in self.current_image_files:
+                            self.current_image_files.append(out)
+                            self.current_numpy_files.append(out)
+                            self.temp_files.append(out)
+                        name = os.path.basename(out)
+                        self.file_status[name] = '临时'
+                        self.file_visibility[name] = True
                 self._update_file_list()
+                self._refresh_display()
+            elif title == "矢量处理":
+                for o in result.outputs:
+                    if o not in self.current_vector_files:
+                        self.current_vector_files.append(o)
+                    name = os.path.basename(o)
+                    self.file_status[name] = '已保存'
+                    self.file_visibility.setdefault(name, False)
+                self._update_file_list()
+                self._refresh_display()
         else:
             msg = f"{title}失败: {result.message}"
         self.statusBar().showMessage(msg, 5000)
@@ -1157,12 +1970,19 @@ class MainWindow(QMainWindow):
             for item in self.sideList.selectedItems():
                 name = item.text().split(" - ")[0]
                 self.file_status.pop(name, None)
+                removed = False
                 for i, p in enumerate(self.current_image_files):
                     if os.path.basename(p) == name:
                         self.current_image_files.pop(i)
                         if i < len(self.current_numpy_files):
                             self.current_numpy_files.pop(i)
+                        removed = True
                         break
+                if not removed:
+                    for i, p in enumerate(self.current_vector_files):
+                        if os.path.basename(p) == name:
+                            self.current_vector_files.pop(i)
+                            break
                 self.file_visibility.pop(name, None)
             self._update_file_list()
             self._refresh_display()
@@ -1170,6 +1990,7 @@ class MainWindow(QMainWindow):
             self.sideList.clear()
             self.current_image_files.clear()
             self.current_numpy_files.clear()
+            self.current_vector_files.clear()
             self.file_status.clear()
             self.file_visibility.clear()
             self._refresh_display()
@@ -1179,7 +2000,7 @@ class MainWindow(QMainWindow):
         """在侧边栏刷新文件状态列表"""
         self.sideList.blockSignals(True)
         self.sideList.clear()
-        for path in self.current_image_files:
+        for path in self.current_image_files + self.current_vector_files:
             name = os.path.basename(path)
             status = self.file_status.get(name, "")
             item = QListWidgetItem(f"{name} - {status}")
@@ -1203,6 +2024,15 @@ class MainWindow(QMainWindow):
                     self._update_image_label(pix)
                 return
 
+        # 如果没有可见影像，尝试显示矢量文件
+        for vec_path in self.current_vector_files:
+            name = os.path.basename(vec_path)
+            if self.file_visibility.get(name, True):
+                pix = self._load_vector_pixmap(vec_path)
+                if pix:
+                    self._update_image_label(pix)
+                return
+
         # 兼容旧逻辑：尝试从 display_pngs 映射展示生成的 PNG
         for npy_path, png in self.display_pngs.items():
             name = os.path.basename(npy_path)
@@ -1215,6 +2045,30 @@ class MainWindow(QMainWindow):
         # 没有任何可显示内容时清空
         self.imageLabel.clear()
         self.current_pixmap = None
+    
+    def _selected_image_path(self) -> str | None:
+        """返回侧边栏当前选中影像的路径"""
+        items = self.sideList.selectedItems()
+        if not items:
+            return None
+        name = items[0].text().split(" - ")[0]
+        for p in self.current_image_files:
+            if os.path.basename(p) == name:
+                return p
+        return None
+
+    def _selected_numpy_path(self) -> str | None:
+        """返回当前选中文件对应的 numpy 路径"""
+        items = self.sideList.selectedItems()
+        if not items:
+            return None
+        name = items[0].text().split(" - ")[0]
+        for i, p in enumerate(self.current_image_files):
+            if os.path.basename(p) == name:
+                if i < len(self.current_numpy_files):
+                    npy = self.current_numpy_files[i]
+                    return npy or p
+        return None
 
     def eventFilter(self, obj, event):
         if obj is self.imageLabel and event.type() == event.Type.Resize and self.current_pixmap:
@@ -1225,6 +2079,23 @@ class MainWindow(QMainWindow):
             )
             self.imageLabel.setPixmap(scaled)
         return super().eventFilter(obj, event)
+    
+    def closeEvent(self, event: QCloseEvent) -> None:
+        for path in getattr(self, "temp_files", []):
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+                hdr = os.path.splitext(path)[0] + ".hdr"
+                if os.path.exists(hdr):
+                    os.remove(hdr)
+                base, ext = os.path.splitext(path)
+                for extra in (".shx", ".dbf", ".cpg", ".prj"):
+                    side = base + extra
+                    if os.path.exists(side):
+                        os.remove(side)
+            except Exception:
+                pass
+        super().closeEvent(event)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
