@@ -9,9 +9,14 @@
 
 更新说明:
     - 修正传入 data 中路径类型的 features 和 labels 时，自动加载为 numpy.ndarray
+    - 新增对 .pkl 特征/标签文件的支持
 """
 
 from typing import Any, Dict, List
+from pathlib import Path
+import os
+import pickle
+
 from src.processing.task_result import TaskResult
 from src.processing.classification.model_manager import create_classifier_pipeline, compare_classifiers
 
@@ -53,10 +58,30 @@ def run(
         logs.append(f"已读取 config.classification_params: {classification_params}")
 
     # —— 加载 features 和 labels（支持路径和数组） ——
+    def _extract_array(obj):
+        if isinstance(obj, dict):
+            for k in ('features', 'data', 'array', 'image', 'arr'):
+                if k in obj:
+                    return obj[k]
+            if len(obj) == 1:
+                return next(iter(obj.values()))
+            return obj
+        if isinstance(obj, (list, tuple)):
+            return obj[0]
+        return obj
+
     if isinstance(data.get('features'), str):
         fp = data['features']
         try:
-            data['features'] = np.load(fp)
+            ext = os.path.splitext(fp)[1].lower()
+            if ext == '.npy':
+                data['features'] = np.load(fp)
+            elif ext in ('.pkl', '.pickle'):
+                with open(fp, 'rb') as f:
+                    loaded = pickle.load(f)
+                data['features'] = _extract_array(loaded)
+            else:
+                raise ValueError(f"不支持的特征文件格式: {ext}")
             logs.append(f"已加载 features 数组 从 '{fp}'")
         except Exception as e:
             logs.append(f"加载 features 时出错: {e}")
@@ -65,7 +90,15 @@ def run(
     if 'labels' in data and isinstance(data['labels'], str):
         lp = data['labels']
         try:
-            data['labels'] = np.load(lp)
+            ext = os.path.splitext(lp)[1].lower()
+            if ext == '.npy':
+                data['labels'] = np.load(lp)
+            elif ext in ('.pkl', '.pickle'):
+                with open(lp, 'rb') as f:
+                    loaded = pickle.load(f)
+                data['labels'] = _extract_array(loaded)
+            else:
+                raise ValueError(f"不支持的标签文件格式: {ext}")
             logs.append(f"已加载 labels 数组 从 '{lp}'")
         except Exception as e:
             logs.append(f"加载 labels 时出错: {e}")
@@ -97,7 +130,16 @@ def run(
         class_map_path = kwargs.get('class_map_path')
         if class_map_path:
             logs.append(f"参数 class_map_path 已接收: {class_map_path}")
-            # 如需自动保存，可在此处添加 pipeline.save_classification_map(results, class_map_path)
+            try:
+                first_key = next(iter(results))
+                preds = results[first_key].get('predictions')
+                if preds is not None:
+                    Path(class_map_path).parent.mkdir(parents=True, exist_ok=True)
+                    np.save(class_map_path, preds)
+                    logs.append(f"分类结果已保存到 {class_map_path}")
+                    outputs.append(class_map_path)
+            except Exception as e:
+                logs.append(f"保存分类结果失败: {e}")
 
         outputs.append(results)
         return TaskResult(status='success', message='分类完成', outputs=outputs, logs=logs)

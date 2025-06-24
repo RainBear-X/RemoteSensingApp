@@ -73,6 +73,24 @@ from shapely.geometry import Point, LineString, Polygon
 from src.processing.task_manager import TaskManager
 from src.processing.task_result import TaskResult
 
+
+def _load_array_from_pkl(path: str):
+    """从 .pkl 文件中提取数组"""
+    import pickle
+    with open(path, 'rb') as f:
+        obj = pickle.load(f)
+    if isinstance(obj, dict):
+        for k in ('features', 'data', 'array', 'image', 'arr'):
+            if k in obj:
+                return obj[k]
+        if len(obj) == 1:
+            val = next(iter(obj.values()))
+            return val
+        return obj
+    if isinstance(obj, (list, tuple)):
+        return obj[0]
+    return obj
+
 class ImageViewer(QGraphicsView):
     """可缩放和拖动的图像查看器"""
 
@@ -265,7 +283,6 @@ class MainWindow(QMainWindow):
             'actionSharpening':      self.show_sharpening_dialog,
             'actionEdgedetection':   self.show_edge_dialog,
             'actionBandMath':        self.show_band_math_dialog,
-            'actionGenerating':      self.show_feature_extraction_dialog,
         }
 
         # 仅显示静态对话框的动作
@@ -297,6 +314,22 @@ class MainWindow(QMainWindow):
             'actionPolyline':    self.show_create_polyline_dialog,
             'actionPolygon':     self.show_create_polygon_dialog,
         }
+
+        classification_actions = {
+            'actionMaximum_Likelihood':      lambda: self.show_classification_dialog('maximum_likelihood'),
+            'actionMinimum_Distance':       lambda: self.show_classification_dialog('minimum_distance'),
+            'actionSVM':                    lambda: self.show_classification_dialog('svm'),
+            'actionDecision_Tree':          lambda: self.show_classification_dialog('decision_tree'),
+            'actionRandom_Forest':          lambda: self.show_classification_dialog('random_forest'),
+            'actionK_means':                lambda: self.show_classification_dialog('kmeans'),
+            'actionISODATA':                lambda: self.show_classification_dialog('isodata'),
+            'actionDeep_leraning_Classification': self.show_deep_learning_classification_dialog,
+            'actionSave_Model_As':          self.show_save_model_as_dialog,
+            'actionCustom_Color':           self.show_custom_color_dialog,
+            'actionSmooth_Processing':      self.show_smooth_processing_dialog,
+            'actionDenoising':              self.show_denoising_dialog,
+            'actionGenerating':             self.show_generate_report_dialog,
+        }
         for action_name, slot in file_actions.items():
             if hasattr(self, action_name):
                 getattr(self, action_name).triggered.connect(slot)
@@ -314,6 +347,10 @@ class MainWindow(QMainWindow):
                 getattr(self, action_name).triggered.connect(slot)
 
         for action_name, slot in vector_actions.items():
+            if hasattr(self, action_name):
+                getattr(self, action_name).triggered.connect(slot)
+
+        for action_name, slot in classification_actions.items():
             if hasattr(self, action_name):
                 getattr(self, action_name).triggered.connect(slot)
 
@@ -1133,14 +1170,12 @@ class MainWindow(QMainWindow):
 
     def _run_stretch(self, path: str, low: int, high: int, dlg: QDialog):
         try:
-            import numpy as np, pickle, rasterio, tempfile, os
+            import numpy as np, rasterio, tempfile, os
             ext = os.path.splitext(path)[1].lower()
             if ext == '.npy':
                 arr = np.load(path)
             elif ext in ('.pkl', '.pickle'):
-                with open(path, 'rb') as f:
-                    obj = pickle.load(f)
-                arr = obj[0] if isinstance(obj, tuple) else obj
+                arr = _load_array_from_pkl(path)
             else:
                 with rasterio.open(path) as src:
                     arr = src.read()
@@ -1167,14 +1202,12 @@ class MainWindow(QMainWindow):
 
     def _run_equalize(self, path: str, dlg: QDialog):
         try:
-            import numpy as np, pickle, rasterio, tempfile, os
+            import numpy as np, rasterio, tempfile, os
             ext = os.path.splitext(path)[1].lower()
             if ext == '.npy':
                 arr = np.load(path)
             elif ext in ('.pkl', '.pickle'):
-                with open(path, 'rb') as f:
-                    obj = pickle.load(f)
-                arr = obj[0] if isinstance(obj, tuple) else obj
+                arr = _load_array_from_pkl(path)
             else:
                 with rasterio.open(path) as src:
                     arr = src.read()
@@ -1457,10 +1490,10 @@ class MainWindow(QMainWindow):
         dlg.setWindowTitle('Classification')
         layout = QVBoxLayout(dlg)
         feat_edit = QLineEdit(dlg)
-        feat_edit.setPlaceholderText('features.npy')
+        feat_edit.setPlaceholderText('features.npy / features.pkl')
         feat_btn = QPushButton('Browse Features', dlg)
         lbl_edit = QLineEdit(dlg)
-        lbl_edit.setPlaceholderText('labels.npy (optional)')
+        lbl_edit.setPlaceholderText('labels.npy / labels.pkl (optional)')
         lbl_btn = QPushButton('Browse Labels', dlg)
         model_box = QComboBox(dlg)
         model_box.addItems(['decision_tree','random_forest','svm','maximum_likelihood','minimum_distance','kmeans','isodata'])
@@ -1471,8 +1504,8 @@ class MainWindow(QMainWindow):
         for w in (feat_edit, feat_btn, lbl_edit, lbl_btn, model_box, run_btn):
             layout.addWidget(w)
 
-        feat_btn.clicked.connect(lambda: feat_edit.setText(QFileDialog.getOpenFileName(self, '选择 features', '', 'NumPy Files (*.npy)')[0]))
-        lbl_btn.clicked.connect(lambda: lbl_edit.setText(QFileDialog.getOpenFileName(self, '选择 labels', '', 'NumPy Files (*.npy)')[0]))
+        feat_btn.clicked.connect(lambda: feat_edit.setText(QFileDialog.getOpenFileName(self, '选择 features', '', 'Feature Files (*.npy *.pkl *.pickle)')[0]))
+        lbl_btn.clicked.connect(lambda: lbl_edit.setText(QFileDialog.getOpenFileName(self, '选择 labels', '', 'Label Files (*.npy *.pkl *.pickle)')[0]))
 
         def act():
             feats = feat_edit.text().strip()
@@ -1483,12 +1516,40 @@ class MainWindow(QMainWindow):
             if lbl_edit.text().strip():
                 data['labels'] = lbl_edit.text().strip()
             pipeline = {'classifiers': [{'name': model_box.currentText(), 'params': {}}], 'compare': False}
-            params = {'data': data, 'pipeline_config': pipeline, 'model': model_box.currentText()}
+            import tempfile, os
+            out_dir = self.task_manager.config.file_operation_params['output_dir']
+            os.makedirs(out_dir, exist_ok=True)
+            tmp = tempfile.mktemp(prefix='class_', suffix='.npy', dir=out_dir)
+            params = {
+                'data': data,
+                'pipeline_config': pipeline,
+                'model': model_box.currentText(),
+                'class_map_path': tmp,
+            }
+            self.temp_files.append(tmp)
             self.run_classification(params)
             dlg.accept()
 
         run_btn.clicked.connect(act)
         dlg.exec()
+
+    def show_deep_learning_classification_dialog(self):
+        self.show_ui_dialog(os.path.join('Classification', 'Deep_Learning_Classification_dialog.ui'))
+
+    def show_save_model_as_dialog(self):
+        self.show_ui_dialog(os.path.join('Classification', 'Save_Model_As_dialog.ui'))
+
+    def show_custom_color_dialog(self):
+        self.show_ui_dialog(os.path.join('Classification', 'ClassificationResultProcessing', 'Custom_color_dialog.ui'))
+
+    def show_smooth_processing_dialog(self):
+        self.show_ui_dialog(os.path.join('Classification', 'ClassificationResultProcessing', 'Smooth_Processing_dialog.ui'))
+
+    def show_denoising_dialog(self):
+        self.show_ui_dialog(os.path.join('Classification', 'ClassificationResultProcessing', 'Denoising_dialog.ui'))
+
+    def show_generate_report_dialog(self):
+        self.show_ui_dialog(os.path.join('Classification', 'Generating_Classification_Report_dialog.ui'))
 
     def _get_band_count(self) -> int:
         if self.current_image_files:
@@ -1496,13 +1557,11 @@ class MainWindow(QMainWindow):
            ext = os.path.splitext(path)[1].lower()
            if ext in ('.npy', '.pkl', '.pickle'):
                 try:
-                    import numpy as np, pickle
+                    import numpy as np
                     if ext == '.npy':
                         arr = np.load(path)
                     else:
-                        with open(path, 'rb') as f:
-                            data = pickle.load(f)
-                        arr = data[0] if isinstance(data, tuple) else data
+                        arr = _load_array_from_pkl(path)
                     return 1 if arr.ndim == 2 else arr.shape[0]
                 except Exception:
                     pass
@@ -1548,13 +1607,10 @@ class MainWindow(QMainWindow):
                 pix = QPixmap(path)
                 return pix if not pix.isNull() else None
             if ext in ('.npy', '.pkl', '.pickle'):
-                import pickle
                 if ext == '.npy':
                     data = np.load(path)
                 else:
-                    with open(path, 'rb') as f:
-                        obj = pickle.load(f)
-                    data = obj[0] if isinstance(obj, tuple) else obj
+                    data = _load_array_from_pkl(path)
                 if data.ndim == 2:
                     data = data[np.newaxis, ...]
                 if bands is None:
@@ -1644,14 +1700,12 @@ class MainWindow(QMainWindow):
 
     def _load_image_array(self, path: str):
         """读取影像或数组文件为 ndarray"""
-        import numpy as np, pickle, rasterio, os
+        import numpy as np, rasterio, os
         ext = os.path.splitext(path)[1].lower()
         if ext == '.npy':
             return np.load(path)
         if ext in ('.pkl', '.pickle'):
-            with open(path, 'rb') as f:
-                obj = pickle.load(f)
-            return obj[0] if isinstance(obj, tuple) else obj
+            return _load_array_from_pkl(path)
         with rasterio.open(path) as src:
             return src.read()
 
@@ -1680,13 +1734,11 @@ class MainWindow(QMainWindow):
         ext = os.path.splitext(path)[1].lower()
         if ext in ('.npy', '.pkl', '.pickle'):
             try:
-                import numpy as np, pickle
+                import numpy as np
                 if ext == '.npy':
                     arr = np.load(path)
                 else:
-                    with open(path, 'rb') as f:
-                        obj = pickle.load(f)
-                    arr = obj[0] if isinstance(obj, tuple) else obj
+                    arr = _load_array_from_pkl(path)
                 return 1 if arr.ndim == 2 else arr.shape[0]
             except Exception:
                 return 1
@@ -1823,7 +1875,17 @@ class MainWindow(QMainWindow):
             elif title == "分类":
                 for path in self.current_image_files:
                     self.file_status[os.path.basename(path)] = "已分类"
+                for out in result.outputs:
+                    if isinstance(out, str) and out.endswith('.npy'):
+                        if out not in self.current_image_files:
+                            self.current_image_files.append(out)
+                            self.current_numpy_files.append(out)
+                            self.temp_files.append(out)
+                        name = os.path.basename(out)
+                        self.file_status[name] = '临时'
+                        self.file_visibility[name] = True
                 self._update_file_list()
+                self._refresh_display()
             elif title == "矢量处理":
                 for o in result.outputs:
                     if o not in self.current_vector_files:
