@@ -64,14 +64,14 @@ def prepare_features_for_segmentation(
     mats = []
     for name in important:
         if name in features and isinstance(features[name], np.ndarray) and features[name].ndim==2:
-            mats.append(robust_norm := (features[name]-features[name].min())/(features[name].ptp()+1e-10))
+            mats.append(robust_norm := (features[name]-features[name].min())/(np.ptp(features[name])+1e-10))
         elif '_' in name:
             base, idx = name.rsplit('_',1)
             try:
                 idx = int(idx)
                 lst = features.get(base)
                 if isinstance(lst, list) and 0 <= idx < len(lst):
-                    mats.append((lst[idx]-lst[idx].min())/(lst[idx].ptp()+1e-10))
+                    mats.append((lst[idx]-lst[idx].min())/(np.ptp(lst[idx])+1e-10))
             except:
                 continue
     if not mats:
@@ -92,7 +92,7 @@ def hierarchical_feature_fusion(
         if key in features:
             arr = features[key]
             if isinstance(arr, np.ndarray) and arr.ndim==2:
-                L1.append((arr-arr.min())/(arr.ptp()+1e-10))
+                L1.append((arr-arr.min())/(np.ptp(arr)+1e-10))
     L1 = np.stack(L1, axis=-1) if L1 else np.zeros((1,1,1),dtype=np.float32)
     # L2 (自定义示例)
     L2 = []
@@ -100,14 +100,14 @@ def hierarchical_feature_fusion(
         for sub in ['contrast','homogeneity']:
             if sub in features['glcm']:
                 g = features['glcm'][sub]
-                L2.append((g-g.min())/(g.ptp()+1e-10))
+                L2.append((g-g.min())/(np.ptp(g)+1e-10))
     if 'morphological' in features and isinstance(features['morphological'], dict):
         if 'gradient_5' in features['morphological']:
             g5 = features['morphological']['gradient_5']
-            L2.append((g5-g5.min())/(g5.ptp()+1e-10))
+            L2.append((g5-g5.min())/(np.ptp(g5)+1e-10))
     L2 = np.stack(L2, axis=-1) if L2 else np.zeros((1,1,1),dtype=np.float32)
 
-    return {'level_1': L1, 'level_2': L2}
+    return {'level_1': L1, 'level_2': L2}   
 
 def add_spatial_context(
         arr: np.ndarray,

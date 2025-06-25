@@ -3,7 +3,7 @@
 文件: run_classification.py
 模块: src.processing.classification.run_classification
 功能: 分类模块入口，兼容额外参数并自动读取 config.classification_params
-作者: 孟诣楠
+作者: 孟诣楠，张子涵
 版本: v1.0.3
 最近更新: 2025-06-18
 
@@ -79,7 +79,7 @@ def run(
             elif ext in ('.pkl', '.pickle'):
                 with open(fp, 'rb') as f:
                     loaded = pickle.load(f)
-                data['features'] = _extract_array(loaded)
+                data['features'] = loaded[0] if isinstance(loaded, tuple) else loaded
             else:
                 raise ValueError(f"不支持的特征文件格式: {ext}")
             logs.append(f"已加载 features 数组 从 '{fp}'")
@@ -119,6 +119,19 @@ def run(
             logs.append('分类器性能比较完成')
             outputs.append(results)
             return TaskResult(status='success', message='分类比较完成', outputs=outputs, logs=logs)
+
+        # 新增: 自动展开 (H, W, D) + (H, W) 为 (N, D) + (N,)
+        from src.utils.data_adapter import extract_labeled_samples
+        if isinstance(data.get('features'), np.ndarray) and isinstance(data.get('labels'), np.ndarray):
+            try:
+                X, y = extract_labeled_samples(data['features'], data['labels'])
+                data['features'] = X
+                data['labels'] = y
+                logs.append("已将 (H, W, D) 特征与 (H, W) 掩膜标签展开为 (N, D) + (N,)")
+            except Exception as e:
+                logs.append(f"特征与标签展开失败: {e}")
+                return TaskResult(status='failure', message=str(e), outputs=[], logs=logs)
+
 
         # 创建并运行分类管道
         pipeline = create_classifier_pipeline(pipeline_config)

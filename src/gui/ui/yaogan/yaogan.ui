@@ -189,9 +189,35 @@
     <addaction name="actionGuide"/>
     <addaction name="actionHelp"/>
    </widget>
+   <widget class="QMenu" name="menuFEature">
+    <property name="title">
+     <string>Feature</string>
+    </property>
+    <widget class="QMenu" name="menuSpectral_Indices">
+     <property name="title">
+      <string>Spectral Indices</string>
+     </property>
+     <addaction name="separator"/>
+     <addaction name="actionNDVI"/>
+     <addaction name="actionEVI"/>
+     <addaction name="actionMSAVI"/>
+     <addaction name="actionNDWI"/>
+     <addaction name="actionMNDWI"/>
+     <addaction name="actionNDBI"/>
+     <addaction name="actionBSI"/>
+    </widget>
+    <addaction name="actionFeature_Extraction"/>
+    <addaction name="menuSpectral_Indices"/>
+    <addaction name="actionTexture_Features"/>
+    <addaction name="actionPCA_Transformation_4"/>
+    <addaction name="actionMorphological_Filteers_4"/>
+    <addaction name="actionFeature_Sleection_Multi_scale_3"/>
+    <addaction name="actionFeature_Fusion_Context_3"/>
+   </widget>
    <addaction name="menu_File"/>
    <addaction name="menu_ImageDisplay"/>
    <addaction name="menu_image_processing"/>
+   <addaction name="menuFEature"/>
    <addaction name="menu_ROI"/>
    <addaction name="menuClassification"/>
    <addaction name="menuAccuracy_Evaluation"/>
@@ -422,6 +448,121 @@
   <action name="actionHelp">
    <property name="text">
     <string>About This App</string>
+   </property>
+  </action>
+  <action name="actionFeature_Extraction">
+   <property name="text">
+    <string>Feature Extraction</string>
+   </property>
+  </action>
+  <action name="actionNDVI">
+   <property name="text">
+    <string>NDVI</string>
+   </property>
+  </action>
+  <action name="actionEVI">
+   <property name="text">
+    <string>EVI</string>
+   </property>
+  </action>
+  <action name="actionMSAVI">
+   <property name="text">
+    <string>MSAVI</string>
+   </property>
+  </action>
+  <action name="actionNDWI">
+   <property name="text">
+    <string>NDWI</string>
+   </property>
+  </action>
+  <action name="actionMNDWI">
+   <property name="text">
+    <string>MNDWI</string>
+   </property>
+  </action>
+  <action name="actionNDBI">
+   <property name="text">
+    <string>NDBI</string>
+   </property>
+  </action>
+  <action name="actionBSI">
+   <property name="text">
+    <string>BSI</string>
+   </property>
+  </action>
+  <action name="actionTexture_Features">
+   <property name="text">
+    <string>Texture Features</string>
+   </property>
+  </action>
+  <action name="actionPCA_Transformation">
+   <property name="text">
+    <string>PCA Transformation</string>
+   </property>
+  </action>
+  <action name="actionMorphological_Filteers">
+   <property name="text">
+    <string>Morphological Filteers</string>
+   </property>
+  </action>
+  <action name="actionPCA_Transformation_2">
+   <property name="text">
+    <string>PCA Transformation</string>
+   </property>
+  </action>
+  <action name="actionMorphological_Filteers_2">
+   <property name="text">
+    <string>Morphological Filteers</string>
+   </property>
+  </action>
+  <action name="actionFeature_Sleection_Multi_scale">
+   <property name="text">
+    <string>Feature Sleection&amp;Multi-scale</string>
+   </property>
+  </action>
+  <action name="actionFeature_Fusion_Context">
+   <property name="text">
+    <string>Feature Fusion&amp;Context</string>
+   </property>
+  </action>
+  <action name="actionPCA_Transformation_3">
+   <property name="text">
+    <string>PCA Transformation</string>
+   </property>
+  </action>
+  <action name="actionMorphological_Filteers_3">
+   <property name="text">
+    <string>Morphological Filteers</string>
+   </property>
+  </action>
+  <action name="actionFeature_Sleection_Multi_scale_2">
+   <property name="text">
+    <string>Feature Sleection&amp;Multi-scale</string>
+   </property>
+  </action>
+  <action name="actionFeature_Fusion_Context_2">
+   <property name="text">
+    <string>Feature Fusion&amp;Context</string>
+   </property>
+  </action>
+  <action name="actionPCA_Transformation_4">
+   <property name="text">
+    <string>PCA Transformation</string>
+   </property>
+  </action>
+  <action name="actionMorphological_Filteers_4">
+   <property name="text">
+    <string>Morphological Filteers</string>
+   </property>
+  </action>
+  <action name="actionFeature_Sleection_Multi_scale_3">
+   <property name="text">
+    <string>Feature Sleection&amp;Multi-scale</string>
+   </property>
+  </action>
+  <action name="actionFeature_Fusion_Context_3">
+   <property name="text">
+    <string>Feature Fusion&amp;Context</string>
    </property>
   </action>
  </widget>

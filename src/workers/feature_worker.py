@@ -3,6 +3,7 @@
 """
 文件: feature_worker.py
 模块: src.workers.feature_worker
+作者：张子涵
 功能: 特征提取后台工作线程
 """
 from PyQt6.QtCore import QThread, pyqtSignal

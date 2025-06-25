@@ -41,9 +41,9 @@ def calculate_filter_responses(band: np.ndarray) -> dict:
     g5  = cv2.GaussianBlur(img,(5,5),0)/255.0
     g15 = cv2.GaussianBlur(img,(15,15),0)/255.0
     dog = (g5 - g15)
-    features['dog'] = (dog - dog.min())/(dog.ptp()+1e-10)
+    features['dog'] = (dog - dog.min())/(np.ptp(dog)+1e-10)
     lap= cv2.Laplacian(img,cv2.CV_32F)/255.0
-    features['laplacian'] = (lap-lap.min())/(lap.ptp()+1e-10)
+    features['laplacian'] = (lap-lap.min())/(np.ptp(lap)+1e-10)
     sx  = cv2.Sobel(img,cv2.CV_32F,1,0)/255.0
     sy  = cv2.Sobel(img,cv2.CV_32F,0,1)/255.0
     mag = np.sqrt(sx**2+sy**2)
