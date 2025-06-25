@@ -77,6 +77,7 @@ from src.processing.task_manager import TaskManager
 from src.processing.task_result import TaskResult
 from src.utils.image_utils import load_tif_as_numpy
 import tempfile
+from .roi_window import ROIWindow
 
 
 
@@ -639,8 +640,23 @@ class MainWindow(QMainWindow):
         if not self.current_image_files:
             self.statusBar().showMessage('请先加载影像文件', 5000)
             return
-        self.statusBar().showMessage('左键绘制 ROI，右键结束', 0)
-        self.imageLabel.start_roi_drawing(self._on_roi_drawn)
+        img = self._selected_image_path()
+        if not img:
+            img = self.current_image_files[0]
+        if not img:
+            self.statusBar().showMessage('未找到可用的影像数据', 5000)
+            return
+        dlg = ROIWindow(img, self)
+        if dlg.exec() and dlg.saved_mask_path:
+            path = dlg.saved_mask_path
+            name = os.path.basename(path)
+            if path not in self.current_vector_files:
+                self.current_vector_files.append(path)
+            self.file_status[name] = '已保存'
+            self.file_visibility[name] = False
+            self.current_roi_path = path
+            self._update_file_list()
+            self.statusBar().showMessage(f'ROI mask 已保存到 {path}', 5000)
 
     def _on_roi_drawn(self, poly: Polygon | None):
         """ROI 绘制完成后的回调"""
